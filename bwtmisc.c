@@ -48,7 +48,7 @@ int64_t bwa_seq_len(const char *fn_pac)
 	fp = xopen(fn_pac, "rb");
 	fseek(fp, -1, SEEK_END);
 	pac_len = ftell(fp);
-	fread(&c, 1, 1, fp);
+	err_fread(&c, 1, 1, fp);
 	fclose(fp);
 	return (pac_len - 1) * 4 + (int)c;
 }
@@ -69,7 +69,7 @@ bwt_t *bwt_pac2bwt(const char *fn_pac, int use_is)
 	// prepare sequence
 	pac_size = (bwt->seq_len>>2) + ((bwt->seq_len&3) == 0? 0 : 1);
 	buf2 = (ubyte_t*)calloc(pac_size, 1);
-	fread(buf2, 1, pac_size, fp);
+	err_fread(buf2, 1, pac_size, fp);
 	fclose(fp);
 	memset(bwt->L2, 0, 5 * 4);
 	buf = (ubyte_t*)calloc(bwt->seq_len + 1, 1);
@@ -91,6 +91,9 @@ bwt_t *bwt_pac2bwt(const char *fn_pac, int use_is)
 #endif
 	}
 	bwt->bwt = (u_int32_t*)calloc(bwt->bwt_size, 4);
+#if USE_MMAP
+    bwt->mmap_bwt = 0 ;
+#endif
 	for (i = 0; i < bwt->seq_len; ++i)
 		bwt->bwt[i>>4] |= buf[i] << ((15 - (i&15)) << 1);
 	free(buf);
@@ -123,6 +126,7 @@ void bwt_bwtupdate_core(bwt_t *bwt)
 {
 	bwtint_t i, k, c[4], n_occ;
 	uint32_t *buf;
+    bwtint_t oldsize = bwt->bwt_size;
 
 	n_occ = (bwt->seq_len + OCC_INTERVAL - 1) / OCC_INTERVAL + 1;
 	bwt->bwt_size += n_occ * 4; // the new size
@@ -140,7 +144,11 @@ void bwt_bwtupdate_core(bwt_t *bwt)
 	memcpy(buf + k, c, sizeof(bwtint_t) * 4);
 	xassert(k + 4 == bwt->bwt_size, "inconsistent bwt_size");
 	// update bwt
-	free(bwt->bwt); bwt->bwt = buf;
+	bwt_destroy_bwt(bwt, oldsize);
+    bwt->bwt = buf;
+#if USE_MMAP
+    bwt->mmap_bwt = 0;
+#endif
 }
 
 int bwa_bwtupdate(int argc, char *argv[])
@@ -168,7 +176,7 @@ void bwa_pac_rev_core(const char *fn, const char *fn_rev)
 	bufin = (ubyte_t*)calloc(pac_len, 1);
 	bufout = (ubyte_t*)calloc(pac_len, 1);
 	fp = xopen(fn, "rb");
-	fread(bufin, 1, pac_len, fp);
+	err_fread(bufin, 1, pac_len, fp);
 	fclose(fp);
 	for (i = seq_len - 1, j = 0; i >= 0; --i) {
 		int c = bufin[i>>2] >> ((~i&3)<<1) & 3;
@@ -206,7 +214,7 @@ uint8_t *bwa_pac2cspac_core(const bntseq_t *bns)
 	int c1, c2;
 	pac = (uint8_t*)calloc(bns->l_pac/4 + 1, 1);
 	cspac = (uint8_t*)calloc(bns->l_pac/4 + 1, 1);
-	fread(pac, 1, bns->l_pac/4+1, bns->fp_pac);
+	err_fread(pac, 1, bns->l_pac/4+1, bns->fp_pac);
 	rewind(bns->fp_pac);
 	c1 = pac[0]>>6; cspac[0] = c1<<6;
 	for (i = 1; i < bns->l_pac; ++i) {

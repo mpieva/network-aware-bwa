@@ -28,6 +28,7 @@
 #ifndef BWT_BNTSEQ_H
 #define BWT_BNTSEQ_H
 
+#include <stdio.h>
 #include <stdint.h>
 #include <zlib.h>
 

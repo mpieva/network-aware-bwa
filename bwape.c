@@ -1,40 +1,17 @@
+#include "bwape.h"
+
 #include <unistd.h>
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
-#include "bwtaln.h"
-#include "kvec.h"
 #include "bntseq.h"
 #include "utils.h"
 #include "stdaln.h"
 
-typedef struct {
-	int n;
-	bwtint_t *a;
-} poslist_t;
-
-typedef struct {
-	double avg, std, ap_prior;
-	bwtint_t low, high, high_bayesian;
-} isize_info_t;
-
-#include "khash.h"
-KHASH_MAP_INIT_INT64(64, poslist_t)
-
-#include "ksort.h"
 KSORT_INIT_GENERIC(uint64_t)
-
-typedef struct {
-	kvec_t(uint64_t) arr;
-	kvec_t(uint64_t) pos[2];
-	kvec_t(bwt_aln1_t) aln[2];
-} pe_data_t;
-
-#define MIN_HASH_WIDTH 1000
-
-extern int g_log_n[256]; // in bwase.c
+KHASH_MAP_INIT_INT64(64, poslist_t)
 static kh_64_t *g_hash;
 
 void bwase_initialize();
@@ -54,6 +31,7 @@ pe_opt_t *bwa_init_pe_opt()
 	po->max_isize = 500;
 	po->force_isize = 0;
 	po->max_occ = 100000;
+	po->max_occ_se = 3;
 	po->n_multi = 3;
 	po->N_multi = 10;
 	po->type = BWA_PET_STD;
@@ -117,12 +95,23 @@ static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double 
 	p50 = isizes[(int)(tot*0.50 + 0.5)];
 	p75 = isizes[(int)(tot*0.75 + 0.5)];
 	tmp  = (int)(p25 - OUTLIER_BOUND * (p75 - p25) + .499);
+
 	ii->low = tmp > max_len? tmp : max_len; // ii->low is unsigned
+    // XXX This is not meaningful... tmp should not be capable of
+    // underflowing, (p75-p25) is guaranteed to be >=0, too.  If this
+    // was supposed to test for underflow and correct for it, shouldn't it be
+	// ii->low = tmp >= 0 ? tmp : 0;  // ?
+    // (Also, comment is misleading.)
+
 	ii->high = (int)(p75 + OUTLIER_BOUND * (p75 - p25) + .499);
+
+    // first pass...
 	for (i = 0, x = n = 0; i < tot; ++i)
 		if (isizes[i] >= ii->low && isizes[i] <= ii->high)
 			++n, x += isizes[i];
-	ii->avg = (double)x / n;
+	ii->avg = (double)x / n;        // ...gives average of everything between low and high
+
+    // second pass...
 	for (i = 0; i < tot; ++i) {
 		if (isizes[i] >= ii->low && isizes[i] <= ii->high) {
 			double tmp = (isizes[i] - ii->avg) * (isizes[i] - ii->avg);
@@ -134,6 +123,21 @@ static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double 
 	kurtosis = kurtosis/n / (ii->std / n * ii->std / n) - 3;
 	ii->std = sqrt(ii->std / n); // it would be better as n-1, but n is usually very large
 	skewness = skewness / n / (ii->std * ii->std * ii->std);
+
+    // ...gives 2nd, 3rd, 4th central moment for calculation of standard
+    // deviation (square root of variance), kurtosis, skewness.  (Also,
+    // inane comment doesn't explain *why* a wrong formula is used.)
+    //
+    // - Why do we subtract 3 from the kurtosis?  Because it's actually
+    //   "excess kurtosis".
+    // - Why do we divide incorrectly in variance?  Oh, apparently so we
+    //   can save a division and a square root in the skewness
+    //   calculation.  This will never amortize the time spent on
+    //   thinking about this micro-optimization.  m(
+    // - Skewness should be multiplied by (sqrt(n*(n-1))/(n-2)).
+    // - Kurtosis is also biased and could use a (rather complicated)
+    //   correction.
+
 	for (y = 1.0; y < 10.0; y += 0.01)
 		if (.5 * erfc(y / M_SQRT2) < ap_prior / L * (y * ii->std + ii->avg)) break;
 	ii->high_bayesian = (bwtint_t)(y * ii->std + ii->avg + .499);
@@ -158,13 +162,13 @@ static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double 
 	return 0;
 }
 
-static int pairing(bwa_seq_t *p[2], pe_data_t *d, const pe_opt_t *opt, int s_mm, const isize_info_t *ii)
+int pairing(bwa_seq_t *p[2], pe_data_t *d, const pe_opt_t *opt, int s_mm, const isize_info_t *ii)
 {
-	int i, j, o_n, subo_n, cnt_chg = 0, low_bound = ii->low, max_len;
+	int i, j, o_n, subo_n, cnt_chg = 0, /* low_bound = ii->low, */ max_len;
 	uint64_t last_pos[2][2], o_pos[2], subo_score, o_score;
 	max_len = p[0]->full_len;
 	if (max_len < p[1]->full_len) max_len = p[1]->full_len;
-	if (low_bound < max_len) low_bound = max_len;
+	// if (low_bound < max_len) low_bound = max_len;
 
 	// here v>=u. When ii is set, we check insert size with ii; otherwise with opt->max_isize
 #define __pairing_aux(u,v) do {											\
@@ -273,10 +277,6 @@ static int pairing(bwa_seq_t *p[2], pe_data_t *d, const pe_opt_t *opt, int s_mm,
 	return cnt_chg;
 }
 
-typedef struct {
-	kvec_t(bwt_aln1_t) aln;
-} aln_buf_t;
-
 int bwa_cal_pac_pos_pe(const char *prefix, bwt_t *const _bwt[2], int n_seqs, bwa_seq_t *seqs[2], FILE *fp_sa[2], isize_info_t *ii,
 					   const pe_opt_t *opt, const gap_opt_t *gopt, const isize_info_t *last_ii)
 {
@@ -305,11 +305,11 @@ int bwa_cal_pac_pos_pe(const char *prefix, bwt_t *const _bwt[2], int n_seqs, bwa
 			p[j] = seqs[j] + i;
 			p[j]->n_multi = 0;
 			p[j]->extra_flag |= SAM_FPD | (j == 0? SAM_FR1 : SAM_FR2);
-			fread(&n_aln, 4, 1, fp_sa[j]);
+			err_fread(&n_aln, 4, 1, fp_sa[j]);
 			if (n_aln > kv_max(d->aln[j]))
 				kv_resize(bwt_aln1_t, d->aln[j], n_aln);
 			d->aln[j].n = n_aln;
-			fread(d->aln[j].a, sizeof(bwt_aln1_t), n_aln, fp_sa[j]);
+			err_fread(d->aln[j].a, sizeof(bwt_aln1_t), n_aln, fp_sa[j]);
 			kv_copy(bwt_aln1_t, buf[j][i].aln, d->aln[j]); // backup d->aln[j]
 			// generate SE alignment and mapping quality
 			bwa_aln2seq(n_aln, d->aln[j].a, p[j]);
@@ -511,11 +511,8 @@ ubyte_t *bwa_paired_sw(const bntseq_t *bns, const ubyte_t *_pacseq, int n_seqs, 
 	uint64_t n_tot[2], n_mapped[2];
 
 	// load reference sequence
-	if (_pacseq == 0) {
-		pacseq = (ubyte_t*)calloc(bns->l_pac/4+1, 1);
-		rewind(bns->fp_pac);
-		fread(pacseq, 1, bns->l_pac/4+1, bns->fp_pac);
-	} else pacseq = (ubyte_t*)_pacseq;
+	if (_pacseq == 0) pacseq = bwt_restore_pac(bns) ;
+	else pacseq = (ubyte_t*)_pacseq;
 	if (!popt->is_sw || ii->avg < 0.0) return pacseq;
 
 	// perform mate alignment
@@ -670,10 +667,10 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 	g_hash = kh_init(64);
 	last_ii.avg = -1.0;
 
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa[0]);
+	err_fread(&opt, sizeof(gap_opt_t), 1, fp_sa[0]);
 	ks[0] = bwa_open_reads(opt.mode, fn_fa[0]);
 	opt0 = opt;
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa[1]); // overwritten!
+	err_fread(&opt, sizeof(gap_opt_t), 1, fp_sa[1]); // overwritten!
 	ks[1] = bwa_open_reads(opt.mode, fn_fa[1]);
 	if (!(opt.mode & BWA_MODE_COMPREAD)) {
 		popt->type = BWA_PET_SOLID;
@@ -684,9 +681,7 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 			strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0]);
 			strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str);
 			strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1]);
-			pac = (ubyte_t*)calloc(bns->l_pac/4+1, 1);
-			rewind(bns->fp_pac);
-			fread(pac, 1, bns->l_pac/4+1, bns->fp_pac);
+			pac = bwt_restore_pac(bns);
 		}
 	}
 
@@ -715,7 +710,7 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 		for (j = 0; j < 2; ++j)
 			bwa_refine_gapped(bns, n_seqs, seqs[j], pacseq, ntbns);
 		fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
-		if (pac == 0) free(pacseq);
+		if (pac == 0) bwt_destroy_pac(pacseq,bns);
 
 		fprintf(stderr, "[bwa_sai2sam_pe_core] print alignments... ");
 		for (i = 0; i < n_seqs; ++i) {
@@ -737,6 +732,9 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 	}
 
 	// destroy
+	if (pac) {
+		bwt_destroy_pac(pac,bns); bwt_destroy(bwt[0]); bwt_destroy(bwt[1]);
+	}
 	bns_destroy(bns);
 	if (ntbns) bns_destroy(ntbns);
 	for (i = 0; i < 2; ++i) {
@@ -746,15 +744,13 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 	for (iter = kh_begin(g_hash); iter != kh_end(g_hash); ++iter)
 		if (kh_exist(g_hash, iter)) free(kh_val(g_hash, iter).a);
 	kh_destroy(64, g_hash);
-	if (pac) {
-		free(pac); bwt_destroy(bwt[0]); bwt_destroy(bwt[1]);
-	}
 }
 
 int bwa_sai2sam_pe(int argc, char *argv[])
 {
 	extern char *bwa_rg_line, *bwa_rg_id;
 	extern int bwa_set_rg(const char *s);
+    char *ofile=0;
 	int c;
 	pe_opt_t *popt;
 	popt = bwa_init_pe_opt();
@@ -773,7 +769,7 @@ int bwa_sai2sam_pe(int argc, char *argv[])
 		case 'n': popt->n_multi = atoi(optarg); break;
 		case 'N': popt->N_multi = atoi(optarg); break;
 		case 'c': popt->ap_prior = atof(optarg); break;
-		case 'f': xreopen(optarg, "w", stdout); break;
+		case 'f': ofile=optarg; xreopen(optarg, "w", stdout); break;
 		case 'A': popt->force_isize = 1; break;
 		default: return 1;
 		}
@@ -799,6 +795,7 @@ int bwa_sai2sam_pe(int argc, char *argv[])
 		return 1;
 	}
 	bwa_sai2sam_pe_core(argv[optind], argv + optind + 1, argv + optind+3, popt);
+    final_rename( "sai2sam_pe", ofile );
 	free(bwa_rg_line); free(bwa_rg_id);
 	free(popt);
 	return 0;

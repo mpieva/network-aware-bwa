@@ -1,8 +1,11 @@
 #ifndef BWTALN_H
 #define BWTALN_H
 
+#include <string.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include "bwt.h"
+#include "bamlite.h"
 
 #define BWA_TYPE_NO_MATCH 0
 #define BWA_TYPE_UNIQUE 1
@@ -81,7 +84,53 @@ typedef struct {
 	// NM and MD tags
 	uint32_t full_len:20, nm:12;
 	char *md;
+    int max_entries;
 } bwa_seq_t;
+
+/* The structure of the existing code is sufficiently twisted and warped
+ * that I don't see how to untangle it.  So, for bam2bam, reboot the
+ * structure.  We start be reading a logical record from the input file:
+ * read a sequence, and if it's single ended, keep it as such.  If it's
+ * a first or second read, get another one, it should be the other half.
+ * Exchange them if necessary, bomb out if one is missing.
+ *
+ * We further want to keep everything from the original bam file, so we
+ * can reproduce it on output.  Therefore, we simply keep only the
+ * original record.  Here's the new data structure.  If kind is set to
+ * singleton, the second read is invalid.
+ */
+
+enum pair_kind { eof_marker=0, singleton=1, proper_pair=2 } ;
+enum done { undone=0, done=1 } ;
+
+typedef struct {
+    int recno ;
+    enum pair_kind kind ;
+    enum done isdone ;
+    int n_aln1, n_aln2 ; // number of alignments in first/second plus 1 (0 means invalid)
+    bam1_t first ;
+    bam1_t second ;
+    bwt_aln1_t *aln1, *aln2 ;
+} bam_pair_t ;
+
+static inline void bam_init_pair( bam_pair_t *p )
+{
+    memset(p, 0, sizeof(bam_pair_t));
+}
+
+static inline void bam_destroy_pair( bam_pair_t *p )
+{
+    if(p) {
+        if(p->kind > 0) {
+            free(p->first.data);
+            if(p->n_aln1) free(p->aln1);
+        }
+        if(p->kind > 1) {
+            free(p->second.data);
+            if(p->n_aln2) free(p->aln2);
+        }
+    }
+}
 
 #define BWA_MODE_GAPE       0x01
 #define BWA_MODE_COMPREAD   0x02
@@ -111,7 +160,7 @@ typedef struct {
 
 typedef struct {
 	int max_isize, force_isize;
-	int max_occ;
+	int max_occ, max_occ_se;
 	int n_multi, N_multi;
 	int type, is_sw, is_preload;
 	double ap_prior;
@@ -125,17 +174,20 @@ extern "C" {
 #endif
 
 	gap_opt_t *gap_init_opt();
-	void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt);
+	void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt, int nskip);
 
 	bwa_seqio_t *bwa_seq_open(const char *fn);
-	bwa_seqio_t *bwa_bam_open(const char *fn, int which);
+	bwa_seqio_t *bwa_bam_open(const char *fn, int which, char **saif, gap_opt_t *o0, bam_header_t **hh);
 	void bwa_seq_close(bwa_seqio_t *bs);
 	void seq_reverse(int len, ubyte_t *seq, int is_comp);
+    int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair);
+    void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp);
 	bwa_seq_t *bwa_read_seq(bwa_seqio_t *seq, int n_needed, int *n, int mode, int trim_qual);
+    void bwa_free_read_seq1(bwa_seq_t *p);
 	void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs);
 
 	int bwa_cal_maxdiff(int l, double err, double thres);
-	void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt);
+	void bwa_cal_sa_reg_gap(bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt);
 
 	void bwa_cs2nt_core(bwa_seq_t *p, bwtint_t l_pac, ubyte_t *pac);
 

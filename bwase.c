@@ -44,8 +44,9 @@ void bwa_aln2seq_core(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s, int set_ma
 	}
 
 	if (n_multi) {
-		int k, rest, n_occ, z = 0;
-		for (k = n_occ = 0; k < n_aln; ++k) {
+		int k, rest, z = 0;
+        uint64_t n_occ = 0;
+		for (k = 0; k < n_aln; ++k) {
 			const bwt_aln1_t *q = aln + k;
 			n_occ += q->l - q->k + 1;
 		}
@@ -72,8 +73,8 @@ void bwa_aln2seq_core(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s, int set_ma
 				}
 				rest -= q->l - q->k + 1;
 			} else { // Random sampling (http://code.activestate.com/recipes/272884/). In fact, we never come here. 
-				int j, i, k;
-				for (j = rest, i = q->l - q->k + 1, k = 0; j > 0; --j) {
+				int j, i;
+				for (j = rest, i = q->l - q->k + 1; j > 0; --j) {
 					double p = 1.0, x = drand48();
 					while (x < p) p -= p * j / (i--);
 					s->multi[z].pos = q->l - i;
@@ -122,15 +123,14 @@ void bwa_cal_pac_pos_core(const bwt_t *forward_bwt, const bwt_t *reverse_bwt, bw
 	max_diff = fnr > 0.0? bwa_cal_maxdiff(seq->len, BWA_AVG_ERR, fnr) : max_mm;
 	if (seq->strand) { // reverse strand only
 		seq->pos = bwt_sa(forward_bwt, seq->sa);
-		seq->seQ = seq->mapQ = bwa_approx_mapQ(seq, max_diff);
 	} else { // forward strand only
 		/* NB: For gapped alignment, p->pos may not be correct, which
 		 *     will be fixed in refine_gapped_core(). This line also
 		 *     determines the way "x" is calculated in
 		 *     refine_gapped_core() when (ext < 0 && is_end == 0). */
 		seq->pos = reverse_bwt->seq_len - (bwt_sa(reverse_bwt, seq->sa) + seq->len);
-		seq->seQ = seq->mapQ = bwa_approx_mapQ(seq, max_diff);
 	}
+    seq->seQ = seq->mapQ = bwa_approx_mapQ(seq, max_diff);
 }
 
 void bwa_cal_pac_pos(const char *prefix, int n_seqs, bwa_seq_t *seqs, int max_mm, float fnr)
@@ -309,17 +309,11 @@ void bwa_refine_gapped(const bntseq_t *bns, int n_seqs, bwa_seq_t *seqs, ubyte_t
 	int i, j;
 	kstring_t *str;
 
-	if (ntbns) { // in color space
-		ntpac = (ubyte_t*)calloc(ntbns->l_pac/4+1, 1);
-		rewind(ntbns->fp_pac);
-		fread(ntpac, 1, ntbns->l_pac/4 + 1, ntbns->fp_pac);
-	}
+    // in color space
+	if (ntbns) ntpac = bwt_restore_pac(ntbns) ;
 
-	if (!_pacseq) {
-		pacseq = (ubyte_t*)calloc(bns->l_pac/4+1, 1);
-		rewind(bns->fp_pac);
-		fread(pacseq, 1, bns->l_pac/4+1, bns->fp_pac);
-	} else pacseq = _pacseq;
+	if (!_pacseq) pacseq = bwt_restore_pac(bns); 
+	else pacseq = _pacseq;
 	for (i = 0; i != n_seqs; ++i) {
 		bwa_seq_t *s = seqs + i;
 		seq_reverse(s->len, s->seq, 0); // IMPORTANT: s->seq is reversed here!!!
@@ -374,8 +368,8 @@ void bwa_refine_gapped(const bntseq_t *bns, int n_seqs, bwa_seq_t *seqs, ubyte_t
 	if (!ntbns) // trimming is only enabled for Illumina reads
 		for (i = 0; i < n_seqs; ++i) bwa_correct_trimmed(seqs + i);
 
-	if (!_pacseq) free(pacseq);
-	free(ntpac);
+	if (!_pacseq) bwt_destroy_pac(pacseq,bns);
+	bwt_destroy_pac(ntpac,ntbns);
 }
 
 int64_t pos_end(const bwa_seq_t *p)
@@ -404,7 +398,7 @@ int64_t pos_end_multi(const bwt_multi1_t *p, int len) // analogy to pos_end()
 	} else return p->pos + len;
 }
 
-static int64_t pos_5(const bwa_seq_t *p)
+int64_t pos_5(const bwa_seq_t *p)
 {
 	if (p->type != BWA_TYPE_NO_MATCH)
 		return p->strand? pos_end(p) : p->pos;
@@ -428,7 +422,10 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 		// get seqid
 		nn = bns_coor_pac2real(bns, p->pos, j, &seqid);
 		if (p->type != BWA_TYPE_NO_MATCH && p->pos + j - bns->anns[seqid].offset > bns->anns[seqid].len)
+        {
 			flag |= SAM_FSU; // flag UNMAP as this alignment bridges two adjacent reference sequences
+            p->mapQ = 0;
+        }
 
 		// update flag and print it
 		if (p->strand) flag |= SAM_FSR;
@@ -449,11 +446,11 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 
 		// print mate coordinate
 		if (mate && mate->type != BWA_TYPE_NO_MATCH) {
-			int m_seqid, m_is_N;
+			int m_seqid;
 			long long isize;
 			am = mate->seQ < p->seQ? mate->seQ : p->seQ; // smaller single-end mapping quality
 			// redundant calculation here, but should not matter too much
-			m_is_N = bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
+			bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
 			err_printf("\t%s\t", (seqid == m_seqid)? "=" : bns->anns[m_seqid].name);
 			isize = (seqid == m_seqid)? pos_5(mate) - pos_5(p) : 0;
 			if (p->type == BWA_TYPE_NO_MATCH) isize = 0;
@@ -605,7 +602,7 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 	fp_sa = xopen(fn_sa, "r");
 
 	m_aln = 0;
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
+	err_fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
 	if (!(opt.mode & BWA_MODE_COMPREAD)) // in color space; initialize ntpac
 		ntbns = bwa_open_nt(prefix);
 	bwa_print_sam_SQ(bns);
@@ -621,12 +618,12 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 		for (i = 0; i < n_seqs; ++i) {
 			bwa_seq_t *p = seqs + i;
 			int n_aln;
-			fread(&n_aln, 4, 1, fp_sa);
+			err_fread(&n_aln, 4, 1, fp_sa);
 			if (n_aln > m_aln) {
 				m_aln = n_aln;
 				aln = (bwt_aln1_t*)realloc(aln, sizeof(bwt_aln1_t) * m_aln);
 			}
-			fread(aln, sizeof(bwt_aln1_t), n_aln, fp_sa);
+			err_fread(aln, sizeof(bwt_aln1_t), n_aln, fp_sa);
 			bwa_aln2seq_core(n_aln, aln, p, 1, n_occ);
 		}
 
@@ -658,6 +655,7 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 int bwa_sai2sam_se(int argc, char *argv[])
 {
 	int c, n_occ = 3;
+    char *ofile = 0;
 	while ((c = getopt(argc, argv, "hn:f:r:")) >= 0) {
 		switch (c) {
 		case 'h': break;
@@ -668,7 +666,7 @@ int bwa_sai2sam_se(int argc, char *argv[])
 			}
 			break;
 		case 'n': n_occ = atoi(optarg); break;
-		case 'f': xreopen(optarg, "w", stdout); break;
+		case 'f': ofile=optarg; xreopen(optarg, "w", stdout); break;
 		default: return 1;
 		}
 	}
@@ -679,5 +677,6 @@ int bwa_sai2sam_se(int argc, char *argv[])
 	}
 	bwa_sai2sam_se_core(argv[optind], argv[optind+1], argv[optind+2], n_occ);
 	free(bwa_rg_line); free(bwa_rg_id);
+    final_rename( "sai2sam_se", ofile );
 	return 0;
 }

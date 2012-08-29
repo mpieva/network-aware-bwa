@@ -4,7 +4,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#ifdef HAVE_PTHREAD
+#if 0 // def HAVE_PTHREAD
 #include <pthread.h>
 #endif
 #include "bntseq.h"
@@ -464,7 +464,7 @@ static void bsw2_aln_core(int tid, bsw2seq_t *_seq, const bsw2opt_t *_opt, const
 		bwtsw2_t *b[2];
 		l = p->l;
 
-#ifdef HAVE_PTHREAD
+#if 0 // def HAVE_PTHREAD
 		if (x % _opt->n_threads != tid) continue;
 #endif
 
@@ -528,7 +528,7 @@ static void bsw2_aln_core(int tid, bsw2seq_t *_seq, const bsw2opt_t *_opt, const
 	bsw2_global_destroy(pool);
 }
 
-#ifdef HAVE_PTHREAD
+#if 0 // def HAVE_PTHREAD
 typedef struct {
 	int tid;
 	bsw2seq_t *_seq;
@@ -553,7 +553,7 @@ static void process_seqs(bsw2seq_t *_seq, const bsw2opt_t *opt, const bntseq_t *
 {
 	int i;
 
-#ifdef HAVE_PTHREAD
+#if 0 // def HAVE_PTHREAD
 	if (opt->n_threads <= 1) {
 		bsw2_aln_core(0, _seq, opt, bns, pac, target);
 	} else {
@@ -598,14 +598,13 @@ void bsw2_aln(const bsw2opt_t *opt, const bntseq_t *bns, bwt_t * const target[2]
 	uint8_t *pac;
 	bsw2seq_t *_seq;
 
-	pac = calloc(bns->l_pac/4+1, 1);
+	pac = bwt_restore_pac(bns) ;
 	if (pac == 0) {
 		fprintf(stderr, "[bsw2_aln] insufficient memory!\n");
 		return;
 	}
 	for (l = 0; l < bns->n_seqs; ++l)
 		printf("@SQ\tSN:%s\tLN:%d\n", bns->anns[l].name, bns->anns[l].len);
-	fread(pac, 1, bns->l_pac/4+1, bns->fp_pac);
 	fp = xzopen(fn, "r");
 	ks = kseq_init(fp);
 	_seq = calloc(1, sizeof(bsw2seq_t));
@@ -634,5 +633,5 @@ void bsw2_aln(const bsw2opt_t *opt, const bntseq_t *bns, bwt_t * const target[2]
 	free(_seq->seq); free(_seq);
 	kseq_destroy(ks);
 	gzclose(fp);
-	free(pac);
+	bwt_destroy_pac(pac,bns);
 }

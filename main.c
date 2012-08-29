@@ -3,10 +3,6 @@
 #include "main.h"
 #include "utils.h"
 
-#ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "0.5.9-r26-dev"
-#endif
-
 static int usage()
 {
 	fprintf(stderr, "\n");
@@ -16,6 +12,7 @@ static int usage()
 	fprintf(stderr, "Usage:   bwa <command> [options]\n\n");
 	fprintf(stderr, "Command: index         index sequences in the FASTA format\n");
 	fprintf(stderr, "         aln           gapped/ungapped alignment\n");
+	fprintf(stderr, "         bam2bam       aln/samse/sampe all in one\n");
 	fprintf(stderr, "         samse         generate alignment (single ended)\n");
 	fprintf(stderr, "         sampe         generate alignment (paired ended)\n");
 	fprintf(stderr, "         bwasw         BWA-SW for long queries\n");
@@ -28,6 +25,8 @@ static int usage()
 	fprintf(stderr, "         bwt2sa        generate SA from BWT and Occ\n");
 	fprintf(stderr, "         pac2cspac     convert PAC to color-space PAC\n");
 	fprintf(stderr, "         stdsw         standard SW/NW alignment\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "         worker        run worker process for bam2bam\n");
 	fprintf(stderr, "\n");
 	return 1;
 }
@@ -48,6 +47,8 @@ int main(int argc, char *argv[])
 	else if (strcmp(argv[1], "bwt2sa") == 0) return bwa_bwt2sa(argc-1, argv+1);
 	else if (strcmp(argv[1], "index") == 0) return bwa_index(argc-1, argv+1);
 	else if (strcmp(argv[1], "aln") == 0) return bwa_aln(argc-1, argv+1);
+	else if (strcmp(argv[1], "bam2bam") == 0) return bwa_bam_to_bam(argc-1, argv+1);
+	else if (strcmp(argv[1], "worker") == 0) return bwa_worker(argc-1, argv+1);
 	else if (strcmp(argv[1], "sw") == 0) return bwa_stdsw(argc-1, argv+1);
 	else if (strcmp(argv[1], "samse") == 0) return bwa_sai2sam_se(argc-1, argv+1);
 	else if (strcmp(argv[1], "sampe") == 0) return bwa_sai2sam_pe(argc-1, argv+1);

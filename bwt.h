@@ -29,6 +29,7 @@
 #define BWA_BWT_H
 
 #include <stdint.h>
+#include "bntseq.h"
 
 // requirement: (OCC_INTERVAL%16 == 0)
 #define OCC_INTERVAL 0x80
@@ -51,6 +52,10 @@ typedef struct {
 	int sa_intv;
 	bwtint_t n_sa;
 	bwtint_t *sa;
+#if USE_MMAP
+    char mmap_bwt ;
+    char mmap_sa ;
+#endif
 } bwt_t;
 
 #define bwt_bwt(b, k) ((b)->bwt[(k)/OCC_INTERVAL*12 + 4 + (k)%OCC_INTERVAL/16])
@@ -76,10 +81,14 @@ extern "C" {
 	void bwt_dump_bwt(const char *fn, const bwt_t *bwt);
 	void bwt_dump_sa(const char *fn, const bwt_t *bwt);
 
+    ubyte_t *bwt_restore_pac( const bntseq_t *bns );
 	bwt_t *bwt_restore_bwt(const char *fn);
 	void bwt_restore_sa(const char *fn, bwt_t *bwt);
 
 	void bwt_destroy(bwt_t *bwt);
+	void bwt_destroy_bwt(bwt_t *bwt, bwtint_t bwt_size);
+	void bwt_destroy_sa(bwt_t *bwt);
+    void bwt_destroy_pac( ubyte_t *pac, const bntseq_t *bns );
 
 	void bwt_bwtgen(const char *fn_pac, const char *fn_bwt); // from BWT-SW
 	void bwt_cal_sa(bwt_t *bwt, int intv);

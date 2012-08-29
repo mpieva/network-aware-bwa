@@ -12,7 +12,7 @@
 #include "bwtgap.h"
 #include "utils.h"
 
-#ifdef HAVE_PTHREAD
+#if 0 // def HAVE_PTHREAD
 #include <pthread.h>
 #endif
 
@@ -75,7 +75,10 @@ static int bwt_cal_width(const bwt_t *rbwt, int len, const ubyte_t *str, bwt_wid
 	return bid;
 }
 
-void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
+// Sweet.  As a side effect, this functions frees sequence, name,
+// quality.  Could at least have been documented instead of just worked
+// around.  :-/
+void bwa_cal_sa_reg_gap(bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
 {
 	int i, max_l = 0, max_len;
 	gap_stack_t *stack;
@@ -95,9 +98,6 @@ void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seq
 	w[0] = w[1] = 0;
 	for (i = 0; i != n_seqs; ++i) {
 		bwa_seq_t *p = seqs + i;
-#ifdef HAVE_PTHREAD
-		if (i % opt->n_threads != tid) continue;
-#endif
 		p->sa = 0; p->type = BWA_TYPE_NO_MATCH; p->c1 = p->c2 = 0; p->n_aln = 0; p->aln = 0;
 		seq[0] = p->seq; seq[1] = p->rseq;
 		if (max_l < p->len) {
@@ -116,17 +116,17 @@ void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seq
 			bwt_cal_width(bwt[1], opt->seed_len, seq[1] + (p->len - opt->seed_len), seed_w[1]);
 		}
 		// core function
-		p->aln = bwt_match_gap(bwt, p->len, seq, w, p->len <= opt->seed_len? 0 : seed_w, &local_opt, &p->n_aln, stack);
+		p->aln = bwt_match_gap(bwt, p->len, seq, w, p->len <= opt->seed_len? 0 : seed_w, &local_opt, &p->n_aln, stack, &p->max_entries);
 		// store the alignment
-		free(p->name); free(p->seq); free(p->rseq); free(p->qual);
-		p->name = 0; p->seq = p->rseq = p->qual = 0;
+		// free(p->name); free(p->seq); free(p->rseq); free(p->qual);
+		// p->name = 0; p->seq = p->rseq = p->qual = 0;
 	}
 	free(seed_w[0]); free(seed_w[1]);
 	free(w[0]); free(w[1]);
 	gap_destroy_stack(stack);
 }
 
-#ifdef HAVE_PTHREAD
+#if 0 // HAVE_PTHREAD   -- probably broken
 typedef struct {
 	int tid;
 	bwt_t *bwt[2];
@@ -143,6 +143,9 @@ static void *worker(void *data)
 }
 #endif
 
+#define CHUNK1 (0x1000000)
+#define CHUNK2 (0x100000)
+
 bwa_seqio_t *bwa_open_reads(int mode, const char *fn_fa)
 {
 	bwa_seqio_t *ks;
@@ -152,12 +155,12 @@ bwa_seqio_t *bwa_open_reads(int mode, const char *fn_fa)
 		if (mode & BWA_MODE_BAM_READ1) which |= 1;
 		if (mode & BWA_MODE_BAM_READ2) which |= 2;
 		if (which == 0) which = 7; // then read all reads
-		ks = bwa_bam_open(fn_fa, which);
+		ks = bwa_bam_open(fn_fa, which, 0, 0, 0);
 	} else ks = bwa_seq_open(fn_fa);
 	return ks;
 }
 
-void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt)
+void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt, int nskip)
 {
 	int i, n_seqs, tot_seqs = 0;
 	bwa_seq_t *seqs;
@@ -175,15 +178,25 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt)
 		free(str);
 	}
 
+    while(nskip) {
+        fprintf(stderr, "[bwa_aln_core] skipping %d sequences.\n",nskip);
+        seqs = bwa_read_seq(ks, nskip>CHUNK2?CHUNK2:nskip, &n_seqs, opt->mode, opt->trim_qual);
+        if(!seqs) {
+            fprintf(stderr, "[bwa_aln_core] EOF while skipping done work. Aborting.\n");
+            exit(1);
+        }
+        nskip-=n_seqs;
+		bwa_free_read_seq(n_seqs, seqs);
+    }
+
 	// core loop
-	err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
 	while ((seqs = bwa_read_seq(ks, 0x40000, &n_seqs, opt->mode, opt->trim_qual)) != 0) {
 		tot_seqs += n_seqs;
 		t = clock();
 
 		fprintf(stderr, "[bwa_aln_core] calculate SA coordinate... ");
 
-#ifdef HAVE_PTHREAD
+#if 0 // HAVE_PTHREAD -- surely broken now
 		if (opt->n_threads <= 1) { // no multi-threading at all
 			bwa_cal_sa_reg_gap(0, bwt, n_seqs, seqs, opt);
 		} else {
@@ -204,7 +217,7 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt)
 			free(data); free(tid);
 		}
 #else
-		bwa_cal_sa_reg_gap(0, bwt, n_seqs, seqs, opt);
+		bwa_cal_sa_reg_gap(bwt, n_seqs, seqs, opt);
 #endif
 
 		fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
@@ -225,12 +238,55 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt)
 	// destroy
 	bwt_destroy(bwt[0]); bwt_destroy(bwt[1]);
 	bwa_seq_close(ks);
+    fprintf(stderr, "[bwa_aln_core] finished cleanly, shutting down.\n");
+}
+
+int attempt_recovery( const char* fn, gap_opt_t *opts0 )
+{
+    FILE *f = fopen( fn, "rb" ) ;
+    gap_opt_t opts;
+    bwt_aln1_t buf;
+    int skip = 0 ;
+    long last_good = 0 ;
+
+    if( f && fread(&opts, 1, sizeof(gap_opt_t), f) == sizeof(gap_opt_t) ) {
+        fprintf(stderr, "[bwa_aln] %s exists, attempting recovery.\n", fn);
+        for(;;) {
+            int naln ;
+            last_good = ftell(f) ;
+            int n = fread(&naln, 1, 4, f);
+            if( n<4 ) break ;
+
+            for(;naln;--naln)
+                if( fread(&buf, 1, sizeof(bwt_aln1_t), f) < sizeof(bwt_aln1_t) )
+                    goto out;
+            skip++;
+            if(!(skip%CHUNK1))
+                fprintf(stderr, "[bwa_aln] %d records up to position %ld.\n", skip, last_good);
+        }
+out:
+        fprintf(stderr, "[bwa_aln] %d records up to position %ld.\n", skip, last_good);
+        fclose(f);
+        
+        xreopen(fn, "rb+", stdout);
+        if( 0!=fseek(stdout, last_good, SEEK_SET) ) {
+            fprintf(stderr, "[bwa_aln] seek failed, aborting.");
+            exit(1);
+        }
+        memmove( opts0, &opts, sizeof(gap_opt_t) ) ;
+        return skip;
+    } else {
+        xreopen(fn, "wb", stdout);
+        return 0;
+    }
 }
 
 int bwa_aln(int argc, char *argv[])
 {
 	int c, opte = -1;
 	gap_opt_t *opt;
+    int skip_seqs = 0;
+    char *ofile = 0;
 
 	opt = gap_init_opt();
 	while ((c = getopt(argc, argv, "n:o:e:i:d:l:k:cLR:m:t:NM:O:E:q:f:b012IYB:")) >= 0) {
@@ -255,7 +311,9 @@ int bwa_aln(int argc, char *argv[])
 		case 'q': opt->trim_qual = atoi(optarg); break;
 		case 'c': opt->mode &= ~BWA_MODE_COMPREAD; break;
 		case 'N': opt->mode |= BWA_MODE_NONSTOP; opt->max_top2 = 0x7fffffff; break;
-		case 'f': xreopen(optarg, "wb", stdout); break;
+		case 'f': ofile = optarg;
+                  skip_seqs = attempt_recovery( optarg, opt );
+                  break;
 		case 'b': opt->mode |= BWA_MODE_BAM; break;
 		case '0': opt->mode |= BWA_MODE_BAM_SE; break;
 		case '1': opt->mode |= BWA_MODE_BAM_READ1; break;
@@ -311,8 +369,10 @@ int bwa_aln(int argc, char *argv[])
 			k = l;
 		}
 	}
-	bwa_aln_core(argv[optind], argv[optind+1], opt);
+	err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
+	bwa_aln_core(argv[optind], argv[optind+1], opt, skip_seqs);
 	free(opt);
+    final_rename( "bwa_aln", ofile );
 	return 0;
 }
 

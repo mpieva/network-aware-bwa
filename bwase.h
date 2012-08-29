@@ -18,7 +18,11 @@ extern "C" {
 	// Backfill certain alignment properties mainly centering around number of matches.
 	void bwa_aln2seq(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s);
 	// Calculate the end position of a read given a certain sequence.
+    int64_t pos_5(const bwa_seq_t *p);
 	int64_t pos_end(const bwa_seq_t *p);
+    int64_t pos_end_multi(const bwt_multi1_t *p, int len);
+
+    void bwa_aln2seq_core(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s, int set_main, int n_multi);
 
 #ifdef __cplusplus
 }

@@ -51,10 +51,13 @@ void bwt_cal_sa(bwt_t *bwt, int intv)
 
 	xassert(bwt->bwt, "bwt_t::bwt is not initialized.");
 
-	if (bwt->sa) free(bwt->sa);
+	bwt_destroy_sa(bwt);
 	bwt->sa_intv = intv;
 	bwt->n_sa = (bwt->seq_len + intv) / intv;
 	bwt->sa = (bwtint_t*)calloc(bwt->n_sa, sizeof(bwtint_t));
+#ifdef USE_MMAP
+    bwt->mmap_sa = 0;
+#endif
 	// calculate SA value
 	isa = 0; sa = bwt->seq_len;
 	for (i = 0; i < bwt->seq_len; ++i) {

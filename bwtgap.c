@@ -102,7 +102,8 @@ static inline int int_log2(uint32_t v)
 }
 
 bwt_aln1_t *bwt_match_gap(bwt_t *const bwts[2], int len, const ubyte_t *seq[2], bwt_width_t *w[2],
-						  bwt_width_t *seed_w[2], const gap_opt_t *opt, int *_n_aln, gap_stack_t *stack)
+						  bwt_width_t *seed_w[2], const gap_opt_t *opt, int *_n_aln, gap_stack_t *stack,
+                          int *pmax_entries)
 {
 	int best_score = aln_score(opt->max_diff+1, opt->max_gapo+1, opt->max_gape+1, opt);
 	int best_diff = opt->max_diff + 1, max_diff = opt->max_diff;
@@ -260,5 +261,6 @@ bwt_aln1_t *bwt_match_gap(bwt_t *const bwts[2], int len, const ubyte_t *seq[2], 
 
 	*_n_aln = n_aln;
 	//fprintf(stderr, "max_entries = %d\n", max_entries);
+    if(pmax_entries) *pmax_entries = max_entries;
 	return aln;
 }

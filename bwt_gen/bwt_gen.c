@@ -22,6 +22,7 @@
 
 */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1387,6 +1388,17 @@ static void BWTIncConstruct(BWTInc *bwtInc, const unsigned int numChar)
 
 }
 
+static size_t err_fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+    size_t ret = fread(ptr, size, nmemb, stream);
+    if (ret != nmemb) 
+    {
+        fprintf(stderr, "[fread] %s Abort!\n", strerror(errno));
+        abort();
+    }
+    return ret;
+}
+
 BWTInc *BWTIncConstructFromPacked(const char *inputFileName, const float targetNBit,
 								  const unsigned int initialMaxBuildSize, const unsigned int incMaxBuildSize)
 {
@@ -1413,7 +1425,7 @@ BWTInc *BWTIncConstructFromPacked(const char *inputFileName, const float targetN
 		fprintf(stderr, "BWTIncConstructFromPacked: Cannot determine file length!\n");
 		exit(1);
 	}
-	fread(&lastByteLength, sizeof(unsigned char), 1, packedFile);
+	err_fread(&lastByteLength, sizeof(unsigned char), 1, packedFile);
 	totalTextLength = TextLengthFromBytePacked(packedFileLen, BIT_PER_CHAR, lastByteLength);
 
 	bwtInc = BWTIncCreate(totalTextLength, targetNBit, initialMaxBuildSize, incMaxBuildSize);
@@ -1429,7 +1441,7 @@ BWTInc *BWTIncConstructFromPacked(const char *inputFileName, const float targetN
 
 	fseek(packedFile, -2, SEEK_CUR);
 	fseek(packedFile, -((int)textSizeInByte), SEEK_CUR);
-	fread(bwtInc->textBuffer, sizeof(unsigned char), textSizeInByte + 1, packedFile);
+	err_fread(bwtInc->textBuffer, sizeof(unsigned char), textSizeInByte + 1, packedFile);
 	fseek(packedFile, -((int)textSizeInByte + 1), SEEK_CUR);
 
 	ConvertBytePackedToWordPacked(bwtInc->textBuffer, bwtInc->packedText, ALPHABET_SIZE, textToLoad);
@@ -1444,7 +1456,7 @@ BWTInc *BWTIncConstructFromPacked(const char *inputFileName, const float targetN
 		}
 		textSizeInByte = textToLoad / CHAR_PER_BYTE;
 		fseek(packedFile, -((int)textSizeInByte), SEEK_CUR);
-		fread(bwtInc->textBuffer, sizeof(unsigned char), textSizeInByte, packedFile);
+		err_fread(bwtInc->textBuffer, sizeof(unsigned char), textSizeInByte, packedFile);
 		fseek(packedFile, -((int)textSizeInByte), SEEK_CUR);
 		ConvertBytePackedToWordPacked(bwtInc->textBuffer, bwtInc->packedText, ALPHABET_SIZE, textToLoad);
 		BWTIncConstruct(bwtInc, textToLoad);

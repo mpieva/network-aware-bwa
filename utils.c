@@ -92,6 +92,16 @@ size_t err_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
     return ret;
 }
 
+size_t err_fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+    size_t ret = fread(ptr, size, nmemb, stream);
+    if (ret != nmemb) 
+    {
+        err_fatal_simple_core("fread", strerror(errno));
+    }
+    return ret;
+}
+
 int err_printf(const char *format, ...) 
 {
     va_list arg;
@@ -144,5 +154,21 @@ int err_fclose(FILE *stream)
         err_fatal_simple_core("fclose", strerror(errno));
     }
     return ret;
+}
+
+void final_rename( const char* tag, const char* ofile )
+{
+    if( ofile ) {
+        char* nfile = strdup(ofile);
+        char* e = nfile ;
+        while(*e) e++;
+        while(e!=nfile && e[-1]=='_') e--;
+        if(e!=nfile && e[-1]!='/' && *e) {
+            *e=0;
+            fprintf(stderr, "[%s] finished, renaming %s to %s.\n", tag, ofile, nfile);
+            rename(ofile, nfile) ;
+            free(nfile);
+        }
+    }
 }
 
