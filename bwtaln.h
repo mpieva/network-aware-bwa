@@ -180,7 +180,7 @@ extern "C" {
 	bwa_seqio_t *bwa_bam_open(const char *fn, int which, char **saif, gap_opt_t *o0, bam_header_t **hh);
 	void bwa_seq_close(bwa_seqio_t *bs);
 	void seq_reverse(int len, ubyte_t *seq, int is_comp);
-    int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair);
+    int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken);
     void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp);
 	bwa_seq_t *bwa_read_seq(bwa_seqio_t *seq, int n_needed, int *n, int mode, int trim_qual);
     void bwa_free_read_seq1(bwa_seq_t *p);

@@ -352,39 +352,66 @@ void try_get_sai( FILE **f, int c, int *naln, bwt_aln1_t **aln )
  * fragment with unexpected PE flags).
  * XXX  Right now, we don't know if reading the bam file went smoothly.
  */
-int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair)
+int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken)
 {
     memset(pair, 0, sizeof(bam_pair_t)) ;
-	if (bam_read1(bs->fp, &pair->first) >= 0) {
+	if (bam_read1(bs->fp, &pair->first) < 0) return 0 ;
+    while(1) {
         if (pair->first.core.flag & BAM_FPAIRED) { // paired read, get another
             if (bam_read1(bs->fp, &pair->second) >= 0) {
                 uint32_t flag1 = pair->first.core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
                 uint32_t flag2 = pair->second.core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
                 if (!strcmp(bam1_qname(&pair->first), bam1_qname(&pair->second))) { // actual mates
-                    try_get_sai( bs->sai, 1, &pair->n_aln1, &pair->aln1 ) ;
-                    try_get_sai( bs->sai, 2, &pair->n_aln2, &pair->aln2 ) ;
                     if( flag1 == (BAM_FPAIRED|BAM_FREAD1) && flag2 == (BAM_FPAIRED|BAM_FREAD2) ) { // correct order
+                        try_get_sai( bs->sai, 1, &pair->n_aln1, &pair->aln1 ) ;
+                        try_get_sai( bs->sai, 2, &pair->n_aln2, &pair->aln2 ) ;
                         pair->kind = proper_pair ;
                         return 2 ;
                     } else if (flag2 == (BAM_FPAIRED|BAM_FREAD1) && flag1 == (BAM_FPAIRED|BAM_FREAD2) ) { // reverse order
-                        pair->kind = proper_pair ;
                         memswap(&pair->first, &pair->second, sizeof(bam1_t));
+                        try_get_sai( bs->sai, 2, &pair->n_aln1, &pair->aln1 ) ;
+                        try_get_sai( bs->sai, 1, &pair->n_aln2, &pair->aln2 ) ;
+                        pair->kind = proper_pair ;
                         return 2 ;
+                    } else {
+                        fprintf( stderr, "[read_bam_pair] got a pair, but the flags are wrong (%s).\n", bam1_qname(&pair->first) ) ;
+                        if( allow_broken ) {
+                            pair->first.core.flag &= ~BAM_FREAD2;
+                            pair->first.core.flag |= BAM_FPAIRED|BAM_FREAD1;
+                            pair->second.core.flag &= ~BAM_FREAD1;
+                            pair->second.core.flag |= BAM_FPAIRED|BAM_FREAD2;
+                            try_get_sai( bs->sai, 1, &pair->n_aln1, &pair->aln1 ) ;
+                            try_get_sai( bs->sai, 2, &pair->n_aln2, &pair->aln2 ) ;
+                            pair->kind = proper_pair ;
+                            return 2 ;
+                        }
+                        else return -2 ;
                     }
-                    fprintf( stderr, "[read_bam_pair] got a pair, but the flags are wrong (%s).\n", bam1_qname(&pair->first) ) ;
-                }
-                else
-                    fprintf( stderr, "[read_bam_pair] got two reads, but the names do'nt match (%s,%s).\n",
+                } else {
+                    fprintf( stderr, "[read_bam_pair] got two reads, but the names don't match (%s,%s).\n",
                             bam1_qname(&pair->first), bam1_qname(&pair->second) ) ;
+                    try_get_sai( bs->sai, flag1 & BAM_FREAD1 ? 1 : 2, &pair->n_aln1, &pair->aln1 ) ;
+                    free(pair->first.data);
+                    if(pair->n_aln1) free(pair->aln1);
+                    if( !allow_broken ) {
+                        free(pair->second.data);
+                        if(pair->n_aln2) free(pair->aln2);
+                        return -2 ;
+                    }
+                    memmove(&pair->first, &pair->second, sizeof(bam1_t));
+                    memset(&pair->second, 0, sizeof(bam1_t));
+                }
+            } else {
+                fprintf( stderr, "[read_bam_pair] got a paired read and hit EOF.\n" ) ;
+                free(pair->first.data);
+                if(pair->n_aln1) free(pair->aln1);
+                return allow_broken ? 0 : -2 ;
             }
-            else
-                fprintf( stderr, "[read_bam_pair] got a paired reads and hit EOF.\n" ) ;
-            return -2 ;
         } else { // singleton read
             pair->kind = singleton ;
             try_get_sai( bs->sai, 0, &pair->n_aln1, &pair->aln1 ) ;
             return 1 ;
         }
-    } else return 0 ;
+    }
 }
 

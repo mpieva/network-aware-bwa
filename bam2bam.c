@@ -1,4 +1,3 @@
-#undef FAITHFUL        // try and reproduce stock BWA output?
 #define CHUNKSIZE 0x100000
 
 static const int loudness = 0;
@@ -59,6 +58,8 @@ struct option longopts[] = {
     { "barcode-length",         1, 0, 'B' },
     { "output",                 1, 0, 'f' },
     { "only-aligned",           0, 0, 128 },
+    { "debug-bam",              0, 0, 129 },
+    { "broken-input",           0, 0, 130 },
     { "max-insert-size",        1, 0, 'a' },
     { "max-occurences",         1, 0, 'C' },
     { "max-occurences-se",      1, 0, 'D' },
@@ -71,7 +72,31 @@ struct option longopts[] = {
     { 0,0,0,0 }
 } ;
 
-uint8_t revcom1[256] ;
+// Yes, global variables.  Not very nice, but we'll only load one genome
+// and passing it everywhere gets old after a while.
+
+static bwt_t     *bwt[2]      = {0,0};
+static bntseq_t  *bns         = 0;
+static bntseq_t  *ntbns       = 0;
+static ubyte_t   *pac         = 0;
+
+static gap_opt_t *gap_opt     = 0;
+static pe_opt_t  *pe_opt      = 0;
+static char      *prefix      = 0;
+static int       only_aligned = 0;
+static int       debug_bam    = 0;
+static int       broken_input = 0;
+
+static void      *zmq_context = 0;
+static void      *work_out    = 0;
+static void      *work_in     = 0;
+static int       listen_port  = 0;
+
+static bwa_seqio_t *ks;
+static khint_t iter;
+static isize_info_t ii;
+
+static uint8_t revcom1[256] ;
 static void init_revcom1()
 {
     int i,j;
@@ -337,7 +362,7 @@ void erase_unwanted_tags(bam1_t *out)
             case 'N': keep = p[1] != 'M' ; break ;
             case 'M': keep = p[1] != 'D' ; break ;
             case 'X': keep = !strchr("01ACGMNOT", p[1]) ; break ;
-            case 'Y': keep = p[1] != 'Q' ; break ;
+            case 'Y': keep = p[1] != 'Q' || !debug_bam; break ;
         }
 
         int len = 3 ;
@@ -444,12 +469,7 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 {
 	int j;
     if (p->clip_len < p->full_len) bam_push_int( out, 'X', 'C', p->clip_len );
-#ifndef FAITHFUL
-    if (p->max_entries) bam_push_int( out, 'Y', 'Q', p->max_entries );
-#else
-    out->core.flag &= 0x1ff ;
-#endif
-
+    if (p->max_entries && debug_bam) bam_push_int( out, 'Y', 'Q', p->max_entries );
 
 	if (p->type != BWA_TYPE_NO_MATCH || (mate && mate->type != BWA_TYPE_NO_MATCH)) {
 		int seqid, nn, am = 0;
@@ -597,28 +617,6 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
         bam_resize_cigar( out, 0 ) ;
 	}
 }
-
-// Yes, global variables.  Not very nice, but we'll only load one genome
-// and passing it everywhere gets old after a while.
-
-static bwt_t     *bwt[2]      = {0,0};
-static bntseq_t  *bns         = 0;
-static bntseq_t  *ntbns       = 0;
-static ubyte_t   *pac         = 0;
-
-static gap_opt_t *gap_opt     = 0;
-static pe_opt_t  *pe_opt      = 0;
-static char      *prefix      = 0;
-static int       only_aligned = 0;
-
-static void      *zmq_context = 0;
-static void      *work_out    = 0;
-static void      *work_in     = 0;
-static int       listen_port  = 0;
-
-static bwa_seqio_t *ks;
-static khint_t iter;
-static isize_info_t ii;
 
 static void aln_singleton( bam_pair_t *raw )
 {
@@ -892,7 +890,7 @@ void sequential_loop( BGZF* output )
     int tot_seqs = 0, rc=0 ;
     bam_pair_t raw ;
     for(;;) {
-        rc=read_bam_pair(ks, &raw);
+        rc=read_bam_pair(ks, &raw, broken_input);
         if(rc<0) {
             fprintf( stderr, "[run_reader_thread] error reading input BAM %s\n",
                     rc==-2 ? "(lone mate)" : "" ) ;
@@ -1050,7 +1048,7 @@ void *run_reader_thread( void *socket )
     zmq_msg_t msg;
     bam_init_pair(&raw);
     while (!s_interrupted) {
-        rc=read_bam_pair(ks, &raw);
+        rc=read_bam_pair(ks, &raw, broken_input);
         if(rc<0) {
             fprintf( stderr, "[run_reader_thread] error reading input BAM %s\n",
                     rc==-2 ? "(lone mate)" : "" ) ;
@@ -1573,6 +1571,8 @@ int bwa_bam_to_bam( int argc, char *argv[] )
         case '1':
         case '2': saif[c-'0'] = optarg; break;
         case 128: only_aligned = 1; break;
+        case 129: debug_bam = 1; break;
+        case 130: broken_input = 1; break;
 		default: return 1;
 		}
 	}
@@ -1616,6 +1616,8 @@ int bwa_bam_to_bam( int argc, char *argv[] )
         fprintf(stderr, "\n");
         fprintf(stderr, "         -p, --listen-port PORT            listen for workers on PORT [%d]\n", listen_port);
 		fprintf(stderr, "         -t, --num-threads INT             number of threads [%d]\n", gap_opt->n_threads);
+        fprintf(stderr, "             --debug-bam                   add additional fields to BAM output to aid debugging\n");
+        fprintf(stderr, "             --broken-input                ignore lone mates in input BAM (not recommended)\n");
 		fprintf(stderr, "         -0, -1, -2                        provide up to three sai files to resume from (not recommended)\n");
 		fprintf(stderr, "\n");
         if( !prefix ) 

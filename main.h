@@ -2,7 +2,7 @@
 #define BWA_MAIN_H
 
 #ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "0.5.10-evan.4"
+#define PACKAGE_VERSION "0.5.10-evan.5"
 #endif
 
 #ifdef __cplusplus

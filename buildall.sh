@@ -4,8 +4,8 @@ echo "Building and installing bwa-${version}"
 
 make clean
 make
-make install prefix=/home/public/usr64/stow/bwa-${version}
+make install prefix=/home/public/usr/stow/bwa-${version}
 
-cd /home/public/usr64/stow
+cd /home/public/usr/stow
 stow -v -D bwa*
 stow -v    bwa-${version}
