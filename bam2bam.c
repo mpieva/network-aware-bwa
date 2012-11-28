@@ -1664,6 +1664,7 @@ void *run_device( void *args )
 
 void bwa_worker_core( int nthreads, char* host, int port ) 
 {
+    time_t start_time = time(0) ;
     s_catch_signals();
 	// int tot_seqs=0; // cnt_chg=0;
 	// isize_info_t last_ii = {0} ;
@@ -1726,7 +1727,7 @@ void bwa_worker_core( int nthreads, char* host, int port )
     int npoll=0;
     zmq_msg_t m ;
     zmq_msg_init(&m) ;
-    while (!s_interrupted) {
+    while (!s_interrupted && time(0) - start_time < 90*60) {
         npoll = zmq_poll( pitems, 2, 1E6 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
 
@@ -1740,15 +1741,17 @@ void bwa_worker_core( int nthreads, char* host, int port )
         zterm( zmq_send( socks[3], &m, 0 ), 1, "zmq_send failed" ) break;
     }
 
-    if( !s_interrupted ) {
-        if( npoll==0 )
-            fprintf( stderr, "[bwa_worker_core] No work delivered in %ds.  Terminating.\n", timeout ) ;
-        else if( pitems[1].revents & ZMQ_POLLIN ) {
-            zmq_recv( socks[4], &m, 0 );
-            fprintf( stderr, "[bwa_worker_core] Received termination signal: \"%.*s\".\n",
-                    (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
-        }
-    }
+    if( npoll==0 )
+        fprintf( stderr, "[bwa_worker_core] No work delivered in %ds.  Terminating.\n", timeout ) ;
+    else if( pitems[1].revents & ZMQ_POLLIN ) {
+        zmq_recv( socks[4], &m, 0 );
+        fprintf( stderr, "[bwa_worker_core] Received termination signal: \"%.*s\".\n",
+                (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
+    } else if( s_interrupted ) 
+        fprintf( stderr, "[bwa_worker_core] Received interrupt signal.\n" ) ;
+    else 
+        fprintf( stderr, "[bwa_worker_core] I've been going for %d minutes, I'm tired now.\n",
+                (time(0) - start_time) / 60 ) ;
 
     zmq_msg_close(&m);
     zmq_xclose(socks[4]) ;
