@@ -409,7 +409,7 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 {
 	int j;
 	if (p->type != BWA_TYPE_NO_MATCH || (mate && mate->type != BWA_TYPE_NO_MATCH)) {
-		int seqid, nn, am = 0, flag = p->extra_flag;
+		int seqid, nn, am = 0, m_seqid = -1, flag = p->extra_flag;
 		char XT;
 
 		if (p->type == BWA_TYPE_NO_MATCH) {
@@ -431,6 +431,14 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 		if (p->strand) flag |= SAM_FSR;
 		if (mate) {
 			if (mate->type != BWA_TYPE_NO_MATCH) {
+                int m_seqid, m_j;
+                // redundant calculation here, but should not matter too much
+                bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
+
+                m_j = pos_end(mate) - mate->pos; // m_j is the length of the reference in the alignment
+                if( mate->pos + m_j - bns->anns[m_seqid].offset > bns->anns[m_seqid].len )
+                    flag |= SAM_FMU; // flag MUNMAP as the mate's alignment bridges two adjacent reference sequences
+
 				if (mate->strand) flag |= SAM_FMR;
 			} else flag |= SAM_FMU;
 		}
@@ -446,11 +454,8 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 
 		// print mate coordinate
 		if (mate && mate->type != BWA_TYPE_NO_MATCH) {
-			int m_seqid;
 			long long isize;
 			am = mate->seQ < p->seQ? mate->seQ : p->seQ; // smaller single-end mapping quality
-			// redundant calculation here, but should not matter too much
-			bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
 			err_printf("\t%s\t", (seqid == m_seqid)? "=" : bns->anns[m_seqid].name);
 			isize = (seqid == m_seqid)? pos_5(mate) - pos_5(p) : 0;
 			if (p->type == BWA_TYPE_NO_MATCH) isize = 0;
