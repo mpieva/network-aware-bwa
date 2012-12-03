@@ -491,7 +491,8 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 		nn = bns_coor_pac2real(bns, p->pos, j, &seqid);
 		if (p->type != BWA_TYPE_NO_MATCH && p->pos + j - bns->anns[seqid].offset > bns->anns[seqid].len)
         {
-			out->core.flag |= SAM_FSU; // flag UNMAP as this alignment bridges two adjacent reference sequences
+			out->core.flag |= SAM_FSU;  // flag UNMAP and not PROPERLY PAIRED as this alignment
+            out->core.flag &= ~SAM_FPP; // bridges two adjacent reference sequences
             p->mapQ = 0;
         }
 
@@ -520,9 +521,10 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 			bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
 
             m_j = pos_end(mate) - mate->pos; // m_j is the length of the reference in the alignment
-            if( mate->pos + m_j - bns->anns[m_seqid].offset > bns->anns[m_seqid].len )
-                out->core.flag |= SAM_FMU; // flag MUNMAP as the mate's alignment bridges two adjacent reference sequences
-
+            if( mate->pos + m_j - bns->anns[m_seqid].offset > bns->anns[m_seqid].len ) {
+                out->core.flag |= SAM_FMU;  // flag MUNMAP and not PROPERLY PAIRED as the mate's alignment
+                out->core.flag &= ~SAM_FPP; // bridges two adjacent reference sequences
+            }
             if (mate->strand) out->core.flag |= SAM_FMR;
             out->core.mtid = m_seqid ;
             out->core.mpos = mate->pos - bns->anns[m_seqid].offset ;
@@ -530,6 +532,7 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
             else out->core.isize = (seqid == m_seqid)? pos_5(mate) - pos_5(p) : 0;
 		} else if (mate) {
             out->core.flag |= SAM_FMU;
+            out->core.flag &= ~SAM_FPP;
             out->core.mtid = seqid ;
             out->core.mpos = p->pos - bns->anns[seqid].offset ;
             out->core.isize = 0;

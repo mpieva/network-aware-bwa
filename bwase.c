@@ -416,6 +416,7 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 			p->pos = mate->pos;
 			p->strand = mate->strand;
 			flag |= SAM_FSU;
+            flag &= ~SAM_FPP ;
 			j = 1;
 		} else j = pos_end(p) - p->pos; // j is the length of the reference in the alignment
 
@@ -424,6 +425,7 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 		if (p->type != BWA_TYPE_NO_MATCH && p->pos + j - bns->anns[seqid].offset > bns->anns[seqid].len)
         {
 			flag |= SAM_FSU; // flag UNMAP as this alignment bridges two adjacent reference sequences
+            flag &= ~SAM_FPP ;
             p->mapQ = 0;
         }
 
@@ -436,11 +438,16 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
                 bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
 
                 m_j = pos_end(mate) - mate->pos; // m_j is the length of the reference in the alignment
-                if( mate->pos + m_j - bns->anns[m_seqid].offset > bns->anns[m_seqid].len )
+                if( mate->pos + m_j - bns->anns[m_seqid].offset > bns->anns[m_seqid].len ) {
                     flag |= SAM_FMU; // flag MUNMAP as the mate's alignment bridges two adjacent reference sequences
+                    flag &= ~SAM_FPP ;
+                }
 
 				if (mate->strand) flag |= SAM_FMR;
-			} else flag |= SAM_FMU;
+            } else {
+                flag |= SAM_FMU;
+                flag &= ~SAM_FPP ;
+            }
 		}
 		err_printf("%s\t%d\t%s\t", p->name, flag, bns->anns[seqid].name);
 		err_printf("%d\t%d\t", (int)(p->pos - bns->anns[seqid].offset + 1), p->mapQ);
