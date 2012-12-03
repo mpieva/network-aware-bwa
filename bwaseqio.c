@@ -362,6 +362,10 @@ int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken)
                 uint32_t flag1 = pair->first.core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
                 uint32_t flag2 = pair->second.core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
                 if (!strcmp(bam1_qname(&pair->first), bam1_qname(&pair->second))) { // actual mates
+                    // make sure that either none or both pass QC
+                    pair->first.core.flag |= pair->second.core.flag & SAM_FQC ;
+                    pair->second.core.flag |= pair->first.core.flag & SAM_FQC ;
+
                     if( flag1 == (BAM_FPAIRED|BAM_FREAD1) && flag2 == (BAM_FPAIRED|BAM_FREAD2) ) { // correct order
                         try_get_sai( bs->sai, 1, &pair->n_aln1, &pair->aln1 ) ;
                         try_get_sai( bs->sai, 2, &pair->n_aln2, &pair->aln2 ) ;
