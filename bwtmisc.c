@@ -91,7 +91,7 @@ bwt_t *bwt_pac2bwt(const char *fn_pac, int use_is)
 #endif
 	}
 	bwt->bwt = (u_int32_t*)calloc(bwt->bwt_size, 4);
-#if USE_MMAP
+#ifdef USE_MMAP
     bwt->mmap_bwt = 0 ;
 #endif
 	for (i = 0; i < bwt->seq_len; ++i)
@@ -146,7 +146,7 @@ void bwt_bwtupdate_core(bwt_t *bwt)
 	// update bwt
 	bwt_destroy_bwt(bwt, oldsize);
     bwt->bwt = buf;
-#if USE_MMAP
+#ifdef USE_MMAP
     bwt->mmap_bwt = 0;
 #endif
 }
@@ -158,7 +158,7 @@ int bwa_bwtupdate(int argc, char *argv[])
 		fprintf(stderr, "Usage: bwa bwtupdate <the.bwt>\n");
 		return 1;
 	}
-	bwt = bwt_restore_bwt(argv[1]);
+	bwt = bwt_restore_bwt(argv[1],0);
 	bwt_bwtupdate_core(bwt);
 	bwt_dump_bwt(argv[1], bwt);
 	bwt_destroy(bwt);
@@ -168,7 +168,7 @@ int bwa_bwtupdate(int argc, char *argv[])
 void bwa_pac_rev_core(const char *fn, const char *fn_rev)
 {
 	int64_t seq_len, i;
-	bwtint_t pac_len, j;
+	bwtint_t pac_len;
 	ubyte_t *bufin, *bufout, ct;
 	FILE *fp;
 	seq_len = bwa_seq_len(fn);
@@ -178,7 +178,7 @@ void bwa_pac_rev_core(const char *fn, const char *fn_rev)
 	fp = xopen(fn, "rb");
 	err_fread(bufin, 1, pac_len, fp);
 	fclose(fp);
-	for (i = seq_len - 1, j = 0; i >= 0; --i) {
+	for (i = seq_len - 1; i >= 0; --i) {
 		int c = bufin[i>>2] >> ((~i&3)<<1) & 3;
 		bwtint_t j = seq_len - 1 - i;
 		bufout[j>>2] |= c << ((~j&3)<<1);
@@ -267,7 +267,7 @@ int bwa_bwt2sa(int argc, char *argv[])
 		fprintf(stderr, "Usage: bwa bwt2sa [-i %d] <in.bwt> <out.sa>\n", sa_intv);
 		return 1;
 	}
-	bwt = bwt_restore_bwt(argv[optind]);
+	bwt = bwt_restore_bwt(argv[optind],0);
 	bwt_cal_sa(bwt, sa_intv);
 	bwt_dump_sa(argv[optind+1], bwt);
 	bwt_destroy(bwt);

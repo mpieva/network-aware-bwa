@@ -2,12 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#if USE_MMAP
+#ifdef USE_MMAP
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <unistd.h>
 #endif
 
 #include "bwt.h"
@@ -35,10 +36,25 @@ void bwt_dump_sa(const char *fn, const bwt_t *bwt)
 	fclose(fp);
 }
 
-#if USE_MMAP
-ubyte_t *bwt_restore_pac( const bntseq_t *bns )
+#ifdef USE_MMAP
+void *mmap_t(int touch, void *addr, size_t length, int prot, int flags,
+        int fd, off_t offset)
 {
-    ubyte_t *pac = mmap( 0, bns->l_pac/4+1, PROT_READ, MAP_PRIVATE, fileno(bns->fp_pac), 0 ) ;
+#ifdef MAP_POPULATE
+    if( touch ) flags |= MAP_POPULATE ;
+#endif
+    void *p = mmap(addr, length, prot, flags, fd, offset);
+    if( p != (void*)(-1) && touch ) {
+        char *q = p, *qe = p + length ;
+        int x, ps = sysconf(_SC_PAGE_SIZE) ;
+        for( ; q < qe ; q += ps ) x += *q ;
+    }
+    return p ;
+}
+
+ubyte_t *bwt_restore_pac( const bntseq_t *bns, int touch)
+{
+    ubyte_t *pac = mmap_t( touch, 0, bns->l_pac/4+1, PROT_READ, MAP_PRIVATE, fileno(bns->fp_pac), 0 ) ;
     xassert(pac != (void*)-1, "failed to mmap pac file");
     madvise(pac, bns->l_pac/4+1, MADV_WILLNEED);
     return pac;
@@ -50,13 +66,13 @@ void bwt_destroy_pac( ubyte_t *pac, const bntseq_t *bns )
         fprintf(stderr, "Warning: munmap() of pax failed (%s).  Memory leak?\n", strerror(errno));
 }
 
-void bwt_restore_sa(const char *fn, bwt_t *bwt)
+void bwt_restore_sa(const char *fn, bwt_t *bwt, int touch)
 {
     int fd = open(fn, O_RDONLY);
     xassert(fd>=0, "failed to open sa file");
     off_t len = lseek(fd, 0, SEEK_END);
     xassert(len>=0, "failed to seek in sa file");
-    bwtint_t *raw = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    bwtint_t *raw = mmap_t( touch, 0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
     xassert(raw != (void*)-1, "failed to mmap sa file");
     madvise(raw, len, MADV_WILLNEED);
 
@@ -71,7 +87,7 @@ void bwt_restore_sa(const char *fn, bwt_t *bwt)
     xassert((bwt->n_sa+6) * sizeof(bwtint_t)==len, "SA-BWT inconsistency: length does not match.");
 }
 
-bwt_t *bwt_restore_bwt(const char *fn)
+bwt_t *bwt_restore_bwt(const char *fn, int touch )
 {
     int i, fd = open(fn, O_RDONLY);
     xassert(fd>=0, "failed to open bwt file");
@@ -81,7 +97,7 @@ bwt_t *bwt_restore_bwt(const char *fn)
 
 	bwt->bwt_size = (len - sizeof(bwtint_t) * 5) >> 2;
 
-    bwtint_t *raw = mmap(0, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    bwtint_t *raw = mmap_t( touch, 0, len, PROT_READ, MAP_PRIVATE, fd, 0);
     xassert(raw != (void*)-1, "failed to mmap bwt file");
     madvise(raw, len, MADV_WILLNEED);
     bwt->primary = raw[0] ;

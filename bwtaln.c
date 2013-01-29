@@ -173,8 +173,8 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt, i
 
 	{ // load BWT
 		char *str = (char*)calloc(strlen(prefix) + 10, 1);
-		strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str);
-		strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str);
+		strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,0);
+		strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,0);
 		free(str);
 	}
 

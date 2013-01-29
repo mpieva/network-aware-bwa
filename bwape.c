@@ -66,6 +66,9 @@ static double ierfc(double x) // inverse erfc(); iphi(x) = M_SQRT2 *ierfc(2 * x)
 // for normal distribution, this is about 3std
 #define OUTLIER_BOUND 2.0
 
+/* Interesting... this function looks at seq->pos, but not at
+ * seq->strand?!  Should it not?
+ */
 static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double ap_prior, int64_t L)
 {
 	uint64_t x, *isizes, n_ap = 0;

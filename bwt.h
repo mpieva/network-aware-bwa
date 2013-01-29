@@ -52,7 +52,7 @@ typedef struct {
 	int sa_intv;
 	bwtint_t n_sa;
 	bwtint_t *sa;
-#if USE_MMAP
+#ifdef USE_MMAP
     char mmap_bwt ;
     char mmap_sa ;
 #endif
@@ -81,9 +81,9 @@ extern "C" {
 	void bwt_dump_bwt(const char *fn, const bwt_t *bwt);
 	void bwt_dump_sa(const char *fn, const bwt_t *bwt);
 
-    ubyte_t *bwt_restore_pac( const bntseq_t *bns );
-	bwt_t *bwt_restore_bwt(const char *fn);
-	void bwt_restore_sa(const char *fn, bwt_t *bwt);
+    ubyte_t *bwt_restore_pac(const bntseq_t *bns, int);
+	bwt_t *bwt_restore_bwt(const char *fn,int);
+	void bwt_restore_sa(const char *fn, bwt_t *bwt, int);
 
 	void bwt_destroy(bwt_t *bwt);
 	void bwt_destroy_bwt(bwt_t *bwt, bwtint_t bwt_size);

@@ -115,6 +115,11 @@ int bwa_approx_mapQ(const bwa_seq_t *p, int mm)
  * coordinates. Note that the position will be approximate based on
  * whether indels appear in the read and whether calculations are
  * performed from the start or end of the read.
+ *
+ * XXX  This one is strange... why would you need the reverse_bwt to
+ *      compute a position when it was possible to compute the alignment
+ *      using the forward_bwt only?  Would be cool if we could get rid
+ *      of reverse_bwt in the first alignment stage.
  */
 void bwa_cal_pac_pos_core(const bwt_t *forward_bwt, const bwt_t *reverse_bwt, bwa_seq_t *seq, const int max_mm, const float fnr)
 {

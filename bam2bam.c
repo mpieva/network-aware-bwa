@@ -322,7 +322,7 @@ static void revcom_bam1( bam1_t *b )
     // flip flag
     b->core.flag ^= SAM_FSR;
 
-    // revcom sequence (incl. one nybble of padding)
+    // revcom sequence (incl. up to one nybble of padding)
     for(p=bam1_seq(b), q=bam1_seq(b) + (b->core.l_qseq+1) / 2 - 1; p<q ; ++p,--q)
     {
         uint8_t x = *q ; *q = revcom1[*p] ; *p = revcom1[x] ;
@@ -669,13 +669,6 @@ static void aln_pair( bam_pair_t *raw )
     bam1_to_seq(&raw->first, &seq_first, 1);
     bam1_to_seq(&raw->second, &seq_second, 1);
 
-    // Strategy for paired end data: Originally, bwa operated on a block
-    // at a time, did alignments, inferred insert size.  This is no
-    // longer possible.  Instead, we will collect sequences per read
-    // group until we get the insert size estimate, then complete what
-    // we collected and use the insert size for everything else.  But
-    // right now, we don't do the estimate at all.
-
     // BEGIN from bwa_sai2sam_pe_core
     // BEGIN from bwa_cal_pac_pos_pe
     // note that seqs is not an array of two arrays anymore!!
@@ -721,15 +714,24 @@ static void aln_pair( bam_pair_t *raw )
     }
 
     // generate SE alignment and mapping quality
-    bwa_aln2seq(seq_first.n_aln,  d.aln[0].a, &seq_first);
-    bwa_aln2seq(seq_second.n_aln, d.aln[1].a, &seq_second);
+    bwa_aln2seq(seq_first.n_aln,  d.aln[0].a, &seq_first);              // cheap
+    bwa_aln2seq(seq_second.n_aln, d.aln[1].a, &seq_second);             // cheap
 
-    bwa_cal_pac_pos_core(bwt[0], bwt[1], &seq_first,  gap_opt->max_diff, gap_opt->fnr);
-    bwa_cal_pac_pos_core(bwt[0], bwt[1], &seq_second, gap_opt->max_diff, gap_opt->fnr);
+    // computes pos, seQ, mapQ.  need to store only those to avoid
+    // repeated computation!
+    bwa_cal_pac_pos_core(bwt[0], bwt[1], &seq_first,  gap_opt->max_diff, gap_opt->fnr);  // cheap-ish
+    bwa_cal_pac_pos_core(bwt[0], bwt[1], &seq_second, gap_opt->max_diff, gap_opt->fnr);  // cheap-ish
 
     // XXX inferring isize is thoroughly broken!
+    // Needs:  mapQ, pos, len, 
     // infer_isize(n_seqs, seqs, &ii, pe_opt->ap_prior, bwt[0]->seq_len);
-    // if (ii.avg < 0.0 && last_ii.avg > 0.0) ii = last_ii;
+    //
+    // if it went wrong this time but went right the last time, use the
+    // last estimate
+    // if (ii.avg < 0.0 && last_ii.avg > 0.0) ii = last_ii;                         
+    //
+    // and if it was given on the command line,override the estimate
+    // (with invalid values?!)
     // if (pe_opt->force_isize) {
     // fprintf(stderr, "[%s] discard insert size estimate as user's request.\n", __func__);
     // ii.low = ii.high = 0; ii.avg = ii.std = -1.0;
@@ -834,7 +836,7 @@ static inline double tdiff( struct timeval* tv1, struct timeval *tv2 )
     return (double)(tv2->tv_sec-tv1->tv_sec) + 0.000001 * (double)(tv2->tv_usec-tv1->tv_usec) ;
 }
 
-void init_genome_index( const char* prefix )
+void init_genome_index( const char* prefix, int touch )
 {
     struct timeval tv, tv1 ;
     gettimeofday( &tv, 0 ) ;
@@ -844,17 +846,17 @@ void init_genome_index( const char* prefix )
     init_revcom1();
 
     fprintf(stderr, "[init_genome_index] loading index... ");
-    strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str);
-    strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str);
-    strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0]);
-    strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1]);
+    strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,touch);
+    strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,touch);
+    strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0],touch);
+    strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1],touch);
     free(str);
 
     // if (!(gap_opt.mode & BWA_MODE_COMPREAD)) {  // in color space; initialize ntpac
     //	pe_opt->type = BWA_PET_SOLID;
     //	ntbns = bwa_open_nt(prefix);
     // }	
-    pac = bwt_restore_pac( bns ) ;
+    pac = bwt_restore_pac( bns,touch ) ;
     gettimeofday( &tv1, 0 ) ;
     fprintf(stderr, "%.2f sec\n", tdiff(&tv, &tv1));
 }
@@ -1101,7 +1103,7 @@ void *run_output_thread( BGZF *output, void* socket )
             double sec = tdiff( &tv0, &tv1 ) ;
             if( sec >= 10 ) {
                 if( rate < 0 ) rate = (pair.recno-lastrn) / (1000*sec) ;
-                else rate = ((pair.recno-lastrn) / (1000*sec) + 3*rate) * 0.25 ;
+                else rate = ((pair.recno-lastrn) / (1000*sec) + 15*rate) * 0.0625 ;
                 fprintf( stderr, "[run_output_thread] %d records received in %0.2fs, rate = %.1f kHz.\n",
                         pair.recno-lastrn, sec, rate ) ;
                 lastrn=pair.recno;
@@ -1144,7 +1146,6 @@ void *run_worker_thread( void *arg )
             exit(1) ;
         }
         pair_init_from_msg(&pair, &msg);
-        // fprintf( stderr, "[run_worker_thread] got record %d.\n", pair.recno ) ;
         zmq_msg_close(&msg);
         pair_aln(&pair);
         msg_init_from_pair(&msg,&pair);
@@ -1421,7 +1422,7 @@ void bwa_bam2bam_core( const char *prefix, BGZF *output )
 
     // Initialize genome index.  Needed if and only if we're going to
     // have a worker thread.
-    if( gap_opt->n_threads ) init_genome_index( prefix ) ;
+    if( gap_opt->n_threads ) init_genome_index( prefix,1 ) ;
 
 	g_hash = kh_init(64);
 	// last_ii.avg = -1.0;
@@ -1673,9 +1674,14 @@ void bwa_worker_core( int nthreads, char* host, int port )
 	// int tot_seqs=0; // cnt_chg=0;
 	// isize_info_t last_ii = {0} ;
 
-    // Initialize genome index.
+    // Initialize genome index.  This is basically an mmap, but since
+    // the data is read lazily, startup is slow afterwards.  Therefore,
+    // we touch all of the index (by looping over the data structures
+    // and reading a word every so often), and *then* open the streaming
+    // sockets.  Otherwise we risk running into a timeout before the
+    // index is was even loaded.
     bns = bns_restore(prefix);
-    init_genome_index( prefix ) ;
+    init_genome_index( prefix,1 ) ;
 
 	g_hash = kh_init(64);
 	// last_ii.avg = -1.0;

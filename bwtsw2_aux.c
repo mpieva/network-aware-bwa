@@ -598,7 +598,7 @@ void bsw2_aln(const bsw2opt_t *opt, const bntseq_t *bns, bwt_t * const target[2]
 	uint8_t *pac;
 	bsw2seq_t *_seq;
 
-	pac = bwt_restore_pac(bns) ;
+	pac = bwt_restore_pac(bns,0) ;
 	if (pac == 0) {
 		fprintf(stderr, "[bsw2_aln] insufficient memory!\n");
 		return;

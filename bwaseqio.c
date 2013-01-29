@@ -351,6 +351,8 @@ void try_get_sai( FILE **f, int c, int *naln, bwt_aln1_t **aln )
  * control went wrong, -2 if we got something unexpected (missing mate,
  * fragment with unexpected PE flags).
  * XXX  Right now, we don't know if reading the bam file went smoothly.
+ *      The clean way to fix that is to use a completely different bam
+ *      library.
  */
 int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken)
 {
