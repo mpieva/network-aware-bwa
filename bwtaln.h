@@ -96,42 +96,37 @@ typedef struct {
  * Exchange them if necessary, bomb out if one is missing.
  *
  * We further want to keep everything from the original bam file, so we
- * can reproduce it on output.  Therefore, we simply keep only the
- * original record.  Here's the new data structure.  If kind is set to
- * singleton, the second read is invalid.
+ * can reproduce it on output.  Therefore, we simply keep the original
+ * record.  Here's the new data structure.  If kind is set to singleton,
+ * the second read is invalid.
  */
 
-enum pair_kind { eof_marker=0, singleton=1, proper_pair=2 } ;
-enum done { undone=0, done=1 } ;
+/** Describes the kind of data contained in bam_pair_t, which makes up a
+ * logical record.
+ */
+enum pair_kind {
+    eof_marker=0,   // end-of-file marker, no paylod
+    singleton=1,    // singleton, only bam_rec[0] and bwa_seq[0] are valid
+    proper_pair=2   // a pair, {bam_rec,bwa_seq}[0] is forward, the other reverse
+} ;
+
+/** Describes the processing phase of a logcal bam record (bam_pair_t),
+ * and thereby determines which fields are valid.
+ */
+enum pair_phase { 
+    pristine=0,     // fresh input, only bam_rec[] is valid
+    aligned=1,      // aligned, bam_rec[] and bwa_seq[].aln are valid
+    positioned=2,   // coordinates computed, bam_rec[] and part of bwa_seq[] are valid
+    finished=3      // everything done, only bam_rec[] is valid
+} ;
 
 typedef struct {
-    int recno ;
+    int recno ;             // to put them back into the correct order
     enum pair_kind kind ;
-    enum done isdone ;
-    int n_aln1, n_aln2 ; // number of alignments in first/second plus 1 (0 means invalid)
-    bam1_t first ;
-    bam1_t second ;
-    bwt_aln1_t *aln1, *aln2 ;
+    enum pair_phase phase ;
+    bam1_t bam_rec[2] ;
+    bwa_seq_t bwa_seq[2] ;
 } bam_pair_t ;
-
-static inline void bam_init_pair( bam_pair_t *p )
-{
-    memset(p, 0, sizeof(bam_pair_t));
-}
-
-static inline void bam_destroy_pair( bam_pair_t *p )
-{
-    if(p) {
-        if(p->kind > 0) {
-            free(p->first.data);
-            if(p->n_aln1) free(p->aln1);
-        }
-        if(p->kind > 1) {
-            free(p->second.data);
-            if(p->n_aln2) free(p->aln2);
-        }
-    }
-}
 
 #define BWA_MODE_GAPE       0x01
 #define BWA_MODE_COMPREAD   0x02
@@ -202,5 +197,29 @@ extern "C" {
 #ifdef __cplusplus
 }
 #endif
+
+static inline void bam_init_pair( bam_pair_t *p )
+{
+    memset(p, 0, sizeof(bam_pair_t));
+}
+
+static inline void bam_destroy_pair( bam_pair_t *p )
+{
+    int i ;
+    if(p) {
+        for( i = 0 ; i != p->kind ; ++i ) {
+            free(p->bam_rec[i].data);
+            switch( p->phase ) {
+                case aligned:
+                case positioned:
+                    bwa_free_read_seq1( &p->bwa_seq[i] ) ;
+                case pristine:
+                case finished:
+                    break ;
+            }
+        }
+    }
+}
+
 
 #endif

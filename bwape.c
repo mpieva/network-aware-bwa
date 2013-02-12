@@ -294,10 +294,10 @@ int bwa_cal_pac_pos_pe(const char *prefix, bwt_t *const _bwt[2], int n_seqs, bwa
 	buf[1] = (aln_buf_t*)calloc(n_seqs, sizeof(aln_buf_t));
 
 	if (_bwt[0] == 0) { // load forward SA
-		strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str);
-		strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0]);
-		strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str);
-		strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1]);
+		strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,0);
+		strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0],0);
+		strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,0);
+		strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1],0);
 	} else bwt[0] = _bwt[0], bwt[1] = _bwt[1];
 
 	// SE
@@ -514,7 +514,7 @@ ubyte_t *bwa_paired_sw(const bntseq_t *bns, const ubyte_t *_pacseq, int n_seqs, 
 	uint64_t n_tot[2], n_mapped[2];
 
 	// load reference sequence
-	if (_pacseq == 0) pacseq = bwt_restore_pac(bns) ;
+	if (_pacseq == 0) pacseq = bwt_restore_pac(bns,0) ;
 	else pacseq = (ubyte_t*)_pacseq;
 	if (!popt->is_sw || ii->avg < 0.0) return pacseq;
 
@@ -680,11 +680,11 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 		ntbns = bwa_open_nt(prefix);
 	} else { // for Illumina alignment only
 		if (popt->is_preload) {
-			strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str);
-			strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0]);
-			strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str);
-			strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1]);
-			pac = bwt_restore_pac(bns);
+			strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,0);
+			strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0],0);
+			strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,0);
+			strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1],0);
+			pac = bwt_restore_pac(bns,0);
 		}
 	}
 

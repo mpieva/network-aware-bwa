@@ -50,17 +50,11 @@ lib:
 bwa:lib-recur $(OBJS) main.o
 		$(CC) $(CFLAGS) $(DFLAGS) $(OBJS) main.o -o $@ $(LIBS)
 
-bwt.o:bwt.h
-bwtio.o:bwt.h
-bwtaln.o:bwt.h bwtaln.h kseq.h
-bwt1away.o:bwt.h bwtaln.h
-bwt2fmv.o:bwt.h
-bntseq.o:bntseq.h
-bwtgap.o:bwtgap.h bwtaln.h bwt.h
 
-bwtsw2_core.o:bwtsw2.h bwt.h bwt_lite.h stdaln.h
-bwtsw2_aux.o:bwtsw2.h bwt.h bwt_lite.h stdaln.h
-bwtsw2_main.o:bwtsw2.h
+depend.mk: *.c
+		gcc -MM $^ > $@
+
+-include depend.mk
 
 cleanlocal:
 		rm -f gmon.out *.o a.out $(PROG) *~ *.a

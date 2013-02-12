@@ -72,7 +72,7 @@ void bwt_restore_sa(const char *fn, bwt_t *bwt, int touch)
     xassert(fd>=0, "failed to open sa file");
     off_t len = lseek(fd, 0, SEEK_END);
     xassert(len>=0, "failed to seek in sa file");
-    bwtint_t *raw = mmap_t( touch, 0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    bwtint_t *raw = mmap_t( touch, 0, len, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
     xassert(raw != (void*)-1, "failed to mmap sa file");
     madvise(raw, len, MADV_WILLNEED);
 

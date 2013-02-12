@@ -94,6 +94,17 @@ void bwa_aln2seq_core(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s, int set_ma
 	}
 }
 
+//	uint32_t strand:1,              filled
+//	         type:2,                filled
+//	uint32_t n_mm:8;                filled
+//	        n_gapo:8,               filled
+//	        n_gape:8,               filled
+//	int score;                      filled
+//	int n_aln;                      needed
+//	bwt_aln1_t *aln;                needed
+//	bwtint_t sa,                    filled
+//	uint64_t c1:28,                 filled
+//	         c2:28,                 filled
 void bwa_aln2seq(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s)
 {
 	bwa_aln2seq_core(n_aln, aln, s, 1, 0);
@@ -115,12 +126,16 @@ int bwa_approx_mapQ(const bwa_seq_t *p, int mm)
  * coordinates. Note that the position will be approximate based on
  * whether indels appear in the read and whether calculations are
  * performed from the start or end of the read.
- *
- * XXX  This one is strange... why would you need the reverse_bwt to
- *      compute a position when it was possible to compute the alignment
- *      using the forward_bwt only?  Would be cool if we could get rid
- *      of reverse_bwt in the first alignment stage.
  */
+
+//	uint32_t len:20,                    needed
+//	         strand:1,                  needed
+//	         type:2,                    needed
+//	uint32_t mapQ:8;                    filled
+//	bwtint_t sa,                        needed
+//	         pos;                       filled
+//	uint64_t seQ:8;                     filled
+
 void bwa_cal_pac_pos_core(const bwt_t *forward_bwt, const bwt_t *reverse_bwt, bwa_seq_t *seq, const int max_mm, const float fnr)
 {
 	int max_diff;
@@ -144,8 +159,8 @@ void bwa_cal_pac_pos(const char *prefix, int n_seqs, bwa_seq_t *seqs, int max_mm
 	char str[1024];
 	bwt_t *bwt;
 	// load forward SA
-	strcpy(str, prefix); strcat(str, ".bwt");  bwt = bwt_restore_bwt(str);
-	strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt);
+	strcpy(str, prefix); strcat(str, ".bwt");  bwt = bwt_restore_bwt(str,0);
+	strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str,bwt,0);
 	for (i = 0; i != n_seqs; ++i) {
 		if (seqs[i].strand) bwa_cal_pac_pos_core(bwt, 0, &seqs[i], max_mm, fnr);
 		for (j = 0; j < seqs[i].n_multi; ++j) {
@@ -155,8 +170,8 @@ void bwa_cal_pac_pos(const char *prefix, int n_seqs, bwa_seq_t *seqs, int max_mm
 	}
 	bwt_destroy(bwt);
 	// load reverse BWT and SA
-	strcpy(str, prefix); strcat(str, ".rbwt"); bwt = bwt_restore_bwt(str);
-	strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt);
+	strcpy(str, prefix); strcat(str, ".rbwt"); bwt = bwt_restore_bwt(str,0);
+	strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str,bwt,0);
 	for (i = 0; i != n_seqs; ++i) {
 		if (!seqs[i].strand) bwa_cal_pac_pos_core(0, bwt, &seqs[i], max_mm, fnr);
 		for (j = 0; j < seqs[i].n_multi; ++j) {
@@ -315,9 +330,9 @@ void bwa_refine_gapped(const bntseq_t *bns, int n_seqs, bwa_seq_t *seqs, ubyte_t
 	kstring_t *str;
 
     // in color space
-	if (ntbns) ntpac = bwt_restore_pac(ntbns) ;
+	if (ntbns) ntpac = bwt_restore_pac(ntbns,0) ;
 
-	if (!_pacseq) pacseq = bwt_restore_pac(bns); 
+	if (!_pacseq) pacseq = bwt_restore_pac(bns,0); 
 	else pacseq = _pacseq;
 	for (i = 0; i != n_seqs; ++i) {
 		bwa_seq_t *s = seqs + i;

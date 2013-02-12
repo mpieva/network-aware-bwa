@@ -146,7 +146,7 @@ int bwa_index(int argc, char *argv[])
 		strcpy(str, prefix); strcat(str, ".bwt");
 		t = clock();
 		fprintf(stderr, "[bwa_index] Update BWT... ");
-		bwt = bwt_restore_bwt(str);
+		bwt = bwt_restore_bwt(str,0);
 		bwt_bwtupdate_core(bwt);
 		bwt_dump_bwt(str, bwt);
 		bwt_destroy(bwt);
@@ -157,7 +157,7 @@ int bwa_index(int argc, char *argv[])
 		strcpy(str, prefix); strcat(str, ".rbwt");
 		t = clock();
 		fprintf(stderr, "[bwa_index] Update reverse BWT... ");
-		bwt = bwt_restore_bwt(str);
+		bwt = bwt_restore_bwt(str,0);
 		bwt_bwtupdate_core(bwt);
 		bwt_dump_bwt(str, bwt);
 		bwt_destroy(bwt);
@@ -169,7 +169,7 @@ int bwa_index(int argc, char *argv[])
 		strcpy(str3, prefix); strcat(str3, ".sa");
 		t = clock();
 		fprintf(stderr, "[bwa_index] Construct SA from BWT and Occ... ");
-		bwt = bwt_restore_bwt(str);
+		bwt = bwt_restore_bwt(str,0);
 		bwt_cal_sa(bwt, 32);
 		bwt_dump_sa(str3, bwt);
 		bwt_destroy(bwt);
@@ -181,7 +181,7 @@ int bwa_index(int argc, char *argv[])
 		strcpy(str3, prefix); strcat(str3, ".rsa");
 		t = clock();
 		fprintf(stderr, "[bwa_index] Construct SA from reverse BWT and Occ... ");
-		bwt = bwt_restore_bwt(str);
+		bwt = bwt_restore_bwt(str,0);
 		bwt_cal_sa(bwt, 32);
 		bwt_dump_sa(str3, bwt);
 		bwt_destroy(bwt);

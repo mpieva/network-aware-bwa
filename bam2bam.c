@@ -1,7 +1,7 @@
 #define CHUNKSIZE 0x100000
 
 static const int loudness = 0;
-static const int ring_size = 0x100000;
+static const int ring_size = 0x20000;
 static const int timeout = 30;
 
 
@@ -32,8 +32,8 @@ static const int timeout = 30;
 #include <signal.h>
 #include <stdarg.h>
 
-static const uint64_t the_hwm = 64;
-static const int the_linger = 5000;
+static const int the_hwm = 64;
+static const int the_linger = 2000;
 
 KHASH_MAP_INIT_INT64(64, poslist_t)
 static kh_64_t *g_hash;
@@ -72,6 +72,14 @@ struct option longopts[] = {
     { 0,0,0,0 }
 } ;
 
+struct option workeropts[] = {
+    { "num-threads",            1, 0, 't' },
+    { "host",                   1, 0, 'h' },
+    { "port",                   1, 0, 'p' },
+    { "timeout",                1, 0, 'T' },
+    { 0,0,0,0 }
+} ;
+
 // Yes, global variables.  Not very nice, but we'll only load one genome
 // and passing it everywhere gets old after a while.
 
@@ -86,10 +94,9 @@ static char      *prefix      = 0;
 static int       only_aligned = 0;
 static int       debug_bam    = 0;
 static int       broken_input = 0;
+static int       max_run_time = 90;
 
 static void      *zmq_context = 0;
-static void      *work_out    = 0;
-static void      *work_in     = 0;
 static int       listen_port  = 0;
 
 static bwa_seqio_t *ks;
@@ -115,7 +122,7 @@ static void init_revcom1()
     }
 }
 
-static int s_interrupted = 0;
+static volatile int s_interrupted = 0;
 static void s_signal_handler (int signal_value)
 {
     s_interrupted = 1;
@@ -131,12 +138,12 @@ static void s_catch_signals (void)
     sigaction (SIGTERM, &action, NULL);
 }
 
-int zcheck_at( int rc, int testterm, int status, const char *label, char *format, ... )
+int zcheck_at( int rc, int testterm, int status, const char *label, int line, char *format, ... )
 {
     va_list ap;
-    if (rc>=0) return 0;
+    if (rc != -1) return 0;
     if (testterm && (zmq_errno() == ETERM || zmq_errno() == EINTR)) return 1;
-    fprintf( stderr, "[%s] ", label );
+    fprintf( stderr, "[%s:%d] ", label, line );
     va_start(ap,format);
     vfprintf( stderr, format, ap );
     va_end(ap);
@@ -145,8 +152,8 @@ int zcheck_at( int rc, int testterm, int status, const char *label, char *format
     return 0;
 }
 
-#define zcheck(rc, status, ...) (void)zcheck_at(rc,0,status,__FUNCTION__,__VA_ARGS__)
-#define zterm(rc, status, ...)     if(zcheck_at(rc,1,status,__FUNCTION__,__VA_ARGS__))
+#define zcheck(rc, status, ...) (void)zcheck_at(rc,0,status,__FUNCTION__,__LINE__,__VA_ARGS__)
+#define zterm(rc, status, ...)     if(zcheck_at(rc,1,status,__FUNCTION__,__LINE__,__VA_ARGS__))
 
 // We take the old header, remove the lines we generate ourselves, and
 // incorporate the rest verbatim.  More specifically, HD is added, PG is added
@@ -250,6 +257,12 @@ void find_pp_tag( const char* h, char** pp, char** id )
         snprintf( myid, 50, "bwa-%d", n ) ;
     }
 
+	for (iter = kh_begin(linked); iter != kh_end(linked); ++iter) 
+		if (kh_exist(linked, iter)) 
+            free((void*)kh_key(linked,iter)) ;
+	for (iter = kh_begin(present); iter != kh_end(present); ++iter) 
+		if (kh_exist(present, iter)) 
+            free((void*)kh_key(present,iter)) ;
     kh_destroy_words( linked ) ;
     kh_destroy_words( present ) ;
 }
@@ -342,61 +355,6 @@ static void revcom_bam1( bam1_t *b )
     {
         uint8_t x = *q ; *q = *p ; *p = x ;
     }
-}
-
-// Erase unwanted tagged fields:
-// AM NM CM SM MD X0 X1 XA XC XG XM XN XO XT YQ
-void erase_unwanted_tags(bam1_t *out)
-{
-    int total = out->core.n_cigar*4 + out->core.l_qname +
-        out->core.l_qseq + (out->core.l_qseq + 1)/2;
-    uint8_t *p = out->data + total;
-    uint8_t *q = p ;
-
-    while (p < out->data + out->data_len) {
-        int keep = 1 ;
-        switch(p[0]) {
-            case 'A':
-            case 'S': 
-            case 'C':
-            case 'N': keep = p[1] != 'M' ; break ;
-            case 'M': keep = p[1] != 'D' ; break ;
-            case 'X': keep = !strchr("01ACGMNOT", p[1]) ; break ;
-            case 'Y': keep = p[1] != 'Q' || !debug_bam; break ;
-        }
-
-        int len = 3 ;
-        int count ;
-        switch( p[2] & ~32 ) {
-            case 'C':
-            case 'A': len++; break;
-            case 'S': len+=2; break;
-            case 'I':
-            case 'F': len+=4; break;
-            case 'D': len+=8; break;
-            case 'Z':
-            case 'H': while( p[len] ) len++ ; len++; break;
-            case 'B': count=(int)p[4] << 0 | (int)p[5] << 8 | (int)p[6] << 16 | (int)p[7] << 24 ;
-                      len += 5;
-                      switch( p[3] & ~32 ) {
-                          case 'C':
-                          case 'A': len += count ; break;
-                          case 'S': len += 2*count; break;
-                          case 'I':
-                          case 'F': len += 4*count ; break;
-                          case 'D': len += 8*count ; break;
-                      }
-                      break;
-        }
-
-        if(keep) {
-            memmove(q, p, len);
-            q+=len;
-            total+=len;
-        }
-        p+=len;
-	}
-    out->data_len=total;
 }
 
 // Make room for at least n more bytes.
@@ -624,103 +582,90 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 
 static void aln_singleton( bam_pair_t *raw )
 {
-    int j;
-    bwa_seq_t seq_first ;
-    erase_unwanted_tags(&raw->first);
-    memset( &seq_first, 0, sizeof(bwa_seq_t) ) ;
-    bam1_to_seq(&raw->first, &seq_first, 1);
-
-    // Horrible hack: if we have alignments from an external source
-    // (recovered from sai file), we use them instead of calculating
-    // them.
-    if(raw->n_aln1) {
-        seq_first.n_aln = raw->n_aln1-1 ;
-        seq_first.aln = raw->aln1 ;
-        raw->n_aln1 = 0 ;
-        raw->aln1 = 0 ;
+    // If we already have alignments (could come from sai file or
+    // because the firs phase has already run), we skip the alignment.
+    // (This point shouldn't actually be reached in that case.)
+    if(raw->phase == pristine) {
+        bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1);
+        bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[0], gap_opt);
+        raw->phase = aligned ;
     }
-    else bwa_cal_sa_reg_gap(bwt, 1, &seq_first, gap_opt);
-
-    // from bwa_sai2sam_se_core
-    bwa_seq_t *p = &seq_first ;
-    bwa_aln2seq_core(p->n_aln, p->aln, p, 1, pe_opt->max_occ_se );
-
-    // from bwa_cal_pac_pos
-    bwa_cal_pac_pos_core(bwt[0], bwt[1], p, gap_opt->max_diff, gap_opt->fnr);
-    for (j = 0; j < p->n_multi; ++j) {
-        bwt_multi1_t *q = seq_first.multi + j;
-        if (q->strand) q->pos = bwt_sa(bwt[0], q->pos);
-        else q->pos = bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p->len);
-    }
-    bwa_refine_gapped(bns, 1, p, pac, ntbns);
-    bwa_update_bam1(&raw->first, bns, &seq_first, 0, gap_opt->mode, gap_opt->max_top2);
-    bwa_free_read_seq1(&seq_first);
 }
 
+static void posn_singleton( bam_pair_t *raw )
+{
+    int j ;
+    if( raw->phase == aligned ) {
+        // from bwa_sai2sam_se_core
+        bwa_seq_t *p = &raw->bwa_seq[0] ;
+        bwa_aln2seq_core(p->n_aln, p->aln, p, 1, pe_opt->max_occ_se );
+
+        // from bwa_cal_pac_pos
+        bwa_cal_pac_pos_core(bwt[0], bwt[1], p, gap_opt->max_diff, gap_opt->fnr);
+        for (j = 0; j < p->n_multi; ++j) {
+            bwt_multi1_t *q = raw->bwa_seq[0].multi + j;
+            if (q->strand) q->pos = bwt_sa(bwt[0], q->pos);
+            else q->pos = bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p->len);
+        }
+        raw->phase = positioned ;
+    }
+}
+
+static void finish_singleton( bam_pair_t *raw )
+{
+    if( raw->phase == positioned ) {
+        bwa_seq_t *p = &raw->bwa_seq[0] ;
+        if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1);
+        bwa_refine_gapped(bns, 1, p, pac, ntbns);
+        bwa_update_bam1(&raw->bam_rec[0], bns, p, 0, gap_opt->mode, gap_opt->max_top2);
+        bwa_free_read_seq1(p);
+        raw->phase = finished ;
+    }
+}
+
+// First stage of paired end alignment: this computes the arrays 'aln1'
+// and 'aln2', the two positions, strands and single map qualities.
+// pos, strand, mapQ are stored directly into the bam record.
 static void aln_pair( bam_pair_t *raw )
 {
-    int j;
-    pe_data_t d;
-    bwa_seq_t seq_first, seq_second ;
-    memset( &seq_first, 0, sizeof(bwa_seq_t) ) ;
-    memset( &seq_second, 0, sizeof(bwa_seq_t) ) ;
-    erase_unwanted_tags(&raw->first);
-    erase_unwanted_tags(&raw->second);
-    bam1_to_seq(&raw->first, &seq_first, 1);
-    bam1_to_seq(&raw->second, &seq_second, 1);
+    int j ;
+    if( raw->phase == pristine ) {
+        for( j = 0 ; j != 2 ; ++j ) {
+            bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1);
 
-    // BEGIN from bwa_sai2sam_pe_core
-    // BEGIN from bwa_cal_pac_pos_pe
-    // note that seqs is not an array of two arrays anymore!!
-    // also note that we don't track this
-    // cnt_chg... whatever it was good
-    // for.
-    // cnt_chg = bwa_cal_pac_pos_pe(seqs, &ii, &last_ii);
+            // BEGIN from bwa_sai2sam_pe_core
+            // BEGIN from bwa_cal_pac_pos_pe
+            // note that seqs is not an array of two arrays anymore!!
+            // also note that we don't track this
+            // cnt_chg... whatever it was good
+            // for.
+            // cnt_chg = bwa_cal_pac_pos_pe(seqs, &ii, &last_ii);
 
-    // Horrible hack: if we have alignments from an external source
-    // (recovered from sai file or delivered by small worker), we use
-    // them instead of calculating them.
-    if(raw->n_aln1) {
-        seq_first.n_aln = raw->n_aln1-1 ;
-        seq_first.aln = raw->aln1 ;
-        raw->n_aln1 = 0 ;
-        raw->aln1 = 0 ;
+            bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[j], gap_opt);
+        }
+        raw->phase = aligned ;
     }
-    else bwa_cal_sa_reg_gap(bwt, 1, &seq_first, gap_opt);
+}
 
-    if(raw->n_aln2) {
-        seq_second.n_aln = raw->n_aln2-1 ;
-        seq_second.aln = raw->aln2 ;
-        raw->n_aln2 = 0 ;
-        raw->aln2 = 0 ;
+static void posn_pair( bam_pair_t *raw )
+{
+    int j ;
+    if( raw->phase == aligned ) {
+        for( j = 0 ; j != 2 ; ++j ) {
+            // SE part.  Almost, but not quite the
+            // same as for singletons.  (*sigh*)
+            raw->bwa_seq[j].n_multi = 0 ;
+
+            // generate SE alignment and mapping quality
+            bwa_aln2seq(raw->bwa_seq[j].n_aln, raw->bwa_seq[j].aln, &raw->bwa_seq[j]);
+
+            // Computes pos, seQ, mapQ.  need to store only those to avoid
+            // repeated computation!
+            bwa_cal_pac_pos_core(bwt[0], bwt[1], &raw->bwa_seq[j], gap_opt->max_diff, gap_opt->fnr);
+        }
+        raw->phase = positioned ;
     }
-    else bwa_cal_sa_reg_gap(bwt, 1, &seq_second, gap_opt);
-
-    memset(&d, 0, sizeof(pe_data_t));
-
-    // SE part.  Almost, but not quite the
-    // same as for singletons.  (*sigh*)
-    seq_first.n_multi = 0 ;
-    seq_second.n_multi = 0 ;
-
-    bwa_seq_t *p[2] = { &seq_first, &seq_second } ;
-    // fill d.aln from p.aln
-    for (j = 0; j < 2; ++j) 
-    {
-        if(p[j]->n_aln > kv_max(d.aln[j]))
-            kv_resize(bwt_aln1_t, d.aln[j], p[j]->n_aln);
-        memcpy(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t));
-        d.aln[j].n = p[j]->n_aln; 
-    }
-
-    // generate SE alignment and mapping quality
-    bwa_aln2seq(seq_first.n_aln,  d.aln[0].a, &seq_first);              // cheap
-    bwa_aln2seq(seq_second.n_aln, d.aln[1].a, &seq_second);             // cheap
-
-    // computes pos, seQ, mapQ.  need to store only those to avoid
-    // repeated computation!
-    bwa_cal_pac_pos_core(bwt[0], bwt[1], &seq_first,  gap_opt->max_diff, gap_opt->fnr);  // cheap-ish
-    bwa_cal_pac_pos_core(bwt[0], bwt[1], &seq_second, gap_opt->max_diff, gap_opt->fnr);  // cheap-ish
+}
 
     // XXX inferring isize is thoroughly broken!
     // Needs:  mapQ, pos, len, 
@@ -737,98 +682,124 @@ static void aln_pair( bam_pair_t *raw )
     // ii.low = ii.high = 0; ii.avg = ii.std = -1.0;
     // }
 
-    // PE
 
-    // WTF?  Restore the old crap?  Who broke it in the first place?
-    for (j = 0; j < 2; ++j) 
-    {
-        if(p[j]->n_aln > kv_max(d.aln[j]))
-            kv_resize(bwt_aln1_t, d.aln[j], p[j]->n_aln);
-        memcpy(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t));
-        d.aln[j].n = p[j]->n_aln; 
-    }
+// PE part of alignment.  Needs insert size estimate for pairing and
+// mate pair rescue.
+static void finish_pair( bam_pair_t *raw )
+{
+    if( raw->phase == positioned ) {
+        bwa_seq_t *p[2] = { raw->bwa_seq, raw->bwa_seq+1 } ;
+        pe_data_t d; // Is this copy even needed?!
+        int j;
 
-    if ((p[0]->type == BWA_TYPE_UNIQUE || p[0]->type == BWA_TYPE_REPEAT)
-            && (p[1]->type == BWA_TYPE_UNIQUE || p[1]->type == BWA_TYPE_REPEAT))
-    { // only when both ends mapped
-        uint64_t x;
-        int j, k;
-        long long n_occ[2];
-        for (j = 0; j < 2; ++j) {
-            n_occ[j] = 0;
-            for (k = 0; k < d.aln[j].n; ++k)
-                n_occ[j] += d.aln[j].a[k].l - d.aln[j].a[k].k + 1;
+        memset(&d, 0, sizeof(pe_data_t));
+        for (j = 0; j < 2; ++j) 
+        {
+            if( !raw->bwa_seq[j].seq ) bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1);
+            if(p[j]->n_aln > kv_max(d.aln[j]))
+                kv_resize(bwt_aln1_t, d.aln[j], p[j]->n_aln);
+            memcpy(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t));
+            d.aln[j].n = p[j]->n_aln; 
         }
-        if (n_occ[0] <= pe_opt->max_occ && n_occ[1] <= pe_opt->max_occ) {
-            d.arr.n = 0;
+
+        if ((p[0]->type == BWA_TYPE_UNIQUE || p[0]->type == BWA_TYPE_REPEAT)
+                && (p[1]->type == BWA_TYPE_UNIQUE || p[1]->type == BWA_TYPE_REPEAT))
+        { // only when both ends mapped
+            uint64_t x;
+            int j, k;
+            long long n_occ[2];
             for (j = 0; j < 2; ++j) {
-                for (k = 0; k < d.aln[j].n; ++k) {
-                    bwt_aln1_t *r = d.aln[j].a + k;
-                    bwtint_t l;
-                    if (r->l - r->k + 1 >= MIN_HASH_WIDTH) { // then check hash table
-                        uint64_t key = (uint64_t)r->k<<32 | r->l;
-                        int ret;
-                        khint_t iter = kh_put(64, g_hash, key, &ret);
-                        if (ret) { // not in the hash table; ret must equal 1 as we never remove elements
-                            poslist_t *z = &kh_val(g_hash, iter);
-                            z->n = r->l - r->k + 1;
-                            z->a = (bwtint_t*)malloc(sizeof(bwtint_t) * z->n);
-                            for (l = r->k; l <= r->l; ++l)
-                                z->a[l - r->k] = r->a? bwt_sa(bwt[0], l) : bwt[1]->seq_len - (bwt_sa(bwt[1], l) + p[j]->len);
-                        }
-                        for (l = 0; l < kh_val(g_hash, iter).n; ++l) {
-                            x = kh_val(g_hash, iter).a[l];
-                            x = x<<32 | k<<1 | j;
-                            kv_push(uint64_t, d.arr, x);
-                        }
-                    } else { // then calculate on the fly
-                        for (l = r->k; l <= r->l; ++l) {
-                            x = r->a? bwt_sa(bwt[0], l) : bwt[1]->seq_len - (bwt_sa(bwt[1], l) + p[j]->len);
-                            x = x<<32 | k<<1 | j;
-                            kv_push(uint64_t, d.arr, x);
+                n_occ[j] = 0;
+                for (k = 0; k < d.aln[j].n; ++k)
+                    n_occ[j] += d.aln[j].a[k].l - d.aln[j].a[k].k + 1;
+            }
+            if (n_occ[0] <= pe_opt->max_occ && n_occ[1] <= pe_opt->max_occ) {
+                d.arr.n = 0;
+                for (j = 0; j < 2; ++j) {
+                    for (k = 0; k < d.aln[j].n; ++k) {
+                        bwt_aln1_t *r = d.aln[j].a + k;
+                        bwtint_t l;
+                        if (r->l - r->k + 1 >= MIN_HASH_WIDTH) { // then check hash table
+                            uint64_t key = (uint64_t)r->k<<32 | r->l;
+                            int ret;
+                            khint_t iter = kh_put(64, g_hash, key, &ret);
+                            if (ret) { // not in the hash table; ret must equal 1 as we never remove elements
+                                poslist_t *z = &kh_val(g_hash, iter);
+                                z->n = r->l - r->k + 1;
+                                z->a = (bwtint_t*)malloc(sizeof(bwtint_t) * z->n);
+                                for (l = r->k; l <= r->l; ++l)
+                                    z->a[l - r->k] = r->a? bwt_sa(bwt[0], l) : bwt[1]->seq_len - (bwt_sa(bwt[1], l) + p[j]->len);
+                            }
+                            for (l = 0; l < kh_val(g_hash, iter).n; ++l) {
+                                x = kh_val(g_hash, iter).a[l];
+                                x = x<<32 | k<<1 | j;
+                                kv_push(uint64_t, d.arr, x);
+                            }
+                        } else { // then calculate on the fly
+                            for (l = r->k; l <= r->l; ++l) {
+                                x = r->a? bwt_sa(bwt[0], l) : bwt[1]->seq_len - (bwt_sa(bwt[1], l) + p[j]->len);
+                                x = x<<32 | k<<1 | j;
+                                kv_push(uint64_t, d.arr, x);
+                            }
                         }
                     }
                 }
+                /* cnt_chg += */
+                pairing(p, &d, pe_opt, gap_opt->s_mm, &ii);
             }
-            /* cnt_chg += */
-            pairing(p, &d, pe_opt, gap_opt->s_mm, &ii);
         }
-    }
 
-    if (pe_opt->N_multi || pe_opt->n_multi) {
-        for (j = 0; j < 2; ++j) {
-            if (p[j]->type != BWA_TYPE_NO_MATCH) {
-                int k;
-                if (!(p[j]->extra_flag&SAM_FPP) && p[1-j]->type != BWA_TYPE_NO_MATCH) {
-                    bwa_aln2seq_core(d.aln[j].n, d.aln[j].a, p[j], 0, p[j]->c1+p[j]->c2-1 > pe_opt->N_multi? pe_opt->n_multi : pe_opt->N_multi);
-                } else bwa_aln2seq_core(d.aln[j].n, d.aln[j].a, p[j], 0, pe_opt->n_multi);
-                for (k = 0; k < p[j]->n_multi; ++k) {
-                    bwt_multi1_t *q = p[j]->multi + k;
-                    q->pos = q->strand? bwt_sa(bwt[0], q->pos) : bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p[j]->len);
+        if (pe_opt->N_multi || pe_opt->n_multi) {
+            for (j = 0; j < 2; ++j) {
+                if (p[j]->type != BWA_TYPE_NO_MATCH) {
+                    int k;
+                    if (!(p[j]->extra_flag&SAM_FPP) && p[1-j]->type != BWA_TYPE_NO_MATCH) {
+                        bwa_aln2seq_core(
+                                d.aln[j].n, d.aln[j].a, p[j], 0,
+                                p[j]->c1+p[j]->c2-1 > pe_opt->N_multi ?
+                                pe_opt->n_multi : pe_opt->N_multi );
+                    }
+                    else
+                        bwa_aln2seq_core(d.aln[j].n, d.aln[j].a, p[j], 0, pe_opt->n_multi);
+                    for (k = 0; k < p[j]->n_multi; ++k) {
+                        bwt_multi1_t *q = p[j]->multi + k;
+                        q->pos = q->strand? bwt_sa(bwt[0], q->pos) : bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p[j]->len);
+                    }
                 }
             }
         }
+
+        { // consistency check (copy is not needed if this doesn't fail!)
+            for (j = 0; j < 2; ++j) 
+            {
+                if( d.aln[j].n != p[j]->n_aln ||
+                        memcmp(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t)) )
+                    fprintf( stderr, "oh shit\n" ) ;
+            }
+        }
+
+
+        kv_destroy(d.arr);
+        kv_destroy(d.pos[0]); kv_destroy(d.pos[1]);
+        kv_destroy(d.aln[0]); kv_destroy(d.aln[1]);
+
+        // END from bwa_cal_pac_pos_pe
+        bwa_paired_sw(bns, pac, 1, p, pe_opt, &ii);
+        // last_ii = ii;
+
+        // END from bwa_sai2sam_pe_core
+        bwa_refine_gapped(bns, 1, p[0], pac, ntbns);
+        bwa_refine_gapped(bns, 1, p[1], pac, ntbns);
+
+        // For PE reads, BWA would have concatenated their barcodes.  We
+        // don't, for once because we don't identify barcodes, but also
+        // because the idea feels wrong.
+        bwa_update_bam1( &raw->bam_rec[0],  bns, &raw->bwa_seq[0], &raw->bwa_seq[1], gap_opt->mode, gap_opt->max_top2);
+        bwa_update_bam1( &raw->bam_rec[1], bns, &raw->bwa_seq[1], &raw->bwa_seq[0], gap_opt->mode, gap_opt->max_top2);
+        bwa_free_read_seq1(&raw->bwa_seq[1]);
+        bwa_free_read_seq1(&raw->bwa_seq[0]);
+        raw->phase = finished ;
     }
-
-    kv_destroy(d.arr);
-    kv_destroy(d.pos[0]); kv_destroy(d.pos[1]);
-    kv_destroy(d.aln[0]); kv_destroy(d.aln[1]);
-
-    // END from bwa_cal_pac_pos_pe
-    bwa_paired_sw(bns, pac, 1, p, pe_opt, &ii);
-    // last_ii = ii;
-
-    // END from bwa_sai2sam_pe_core
-    bwa_refine_gapped(bns, 1, p[0], pac, ntbns);
-    bwa_refine_gapped(bns, 1, p[1], pac, ntbns);
-
-    // For PE reads, BWA would have concatenated their barcodes.  We
-    // don't, for once because we don't identify barcodes, but also
-    // because the idea feels wrong.
-    bwa_update_bam1( &raw->first,  bns, &seq_first, &seq_second, gap_opt->mode, gap_opt->max_top2);
-    bwa_update_bam1( &raw->second, bns, &seq_second, &seq_first, gap_opt->mode, gap_opt->max_top2);
-    bwa_free_read_seq1(&seq_second);
-    bwa_free_read_seq1(&seq_first);
 }
 
 static inline double tdiff( struct timeval* tv1, struct timeval *tv2 )
@@ -864,30 +835,58 @@ void init_genome_index( const char* prefix, int touch )
 void pair_aln(bam_pair_t *p)
 {
     switch (p->kind) {
-        case eof_marker: break ;
-        case singleton: aln_singleton(p) ; break ;
+        case eof_marker:  break ;
+        case singleton:   aln_singleton(p) ; break ;
         case proper_pair: aln_pair(p) ; break ;
-        default: fprintf(stderr, "[%s] got impossible type of input records, bailing out.\n", __func__);
-                 exit(1);
+    }
+}
+
+void pair_posn(bam_pair_t *p)
+{
+    switch (p->kind) {
+        case eof_marker: break ;
+        case singleton:   posn_singleton(p) ; break ;
+        case proper_pair: posn_pair(p) ; break ;
+    }
+}
+
+// isize something or other come between those two
+
+void pair_finish(bam_pair_t *p)
+{
+    switch (p->kind) {
+        case eof_marker: break ;
+        case singleton:   finish_singleton(p) ; break ;
+        case proper_pair: finish_pair(p) ; break ;
     }
 }
 
 void pair_print_bam(BGZF *output, bam_pair_t *p)
 {
+    int i ;
     // If "only aligned" is requested and at least one mate is unmapped,
     // we skip the output.  (Conserves time and space where we don't
     // need to pass through the unaligned sequences.)
-    if( only_aligned && p->kind > 0 && (p->first.core.flag  & SAM_FSU) ) return ;
-    if( only_aligned && p->kind > 1 && (p->second.core.flag & SAM_FSU) ) return ;
+    if( only_aligned )
+        for( i = 0 ; i != p->kind ; ++i )
+            if( p->bam_rec[i].core.flag & SAM_FSU )
+                return ;
 
-    if(p->kind > 0) bwa_print_bam1(output, &p->first);
-    if(p->kind > 1) bwa_print_bam1(output, &p->second);
+    for( i = 0 ; i != p->kind ; ++i )
+        bwa_print_bam1(output, &p->bam_rec[i]);
+}
+
+void improve_isize_est(bam_pair_t *p)
+{
+
 }
 
 // This is the simple sequential loop:  We run it if exactly one thread
 // and no listening port is requested.  Doesn't require 0MQ.  As opposed
 // to "classic" BWA, we stop that blockwise nonsense and get exactly one
 // singleton or pair per iteration.
+//
+// XXX Needs to be split into two loops.
 void sequential_loop( BGZF* output )
 {
     struct timeval tv0, tv1 ;
@@ -898,7 +897,7 @@ void sequential_loop( BGZF* output )
     for(;;) {
         rc=read_bam_pair(ks, &raw, broken_input);
         if(rc<0) {
-            fprintf( stderr, "[run_reader_thread] error reading input BAM %s\n",
+            fprintf( stderr, "[sequential_loop] error reading input BAM %s\n",
                     rc==-2 ? "(lone mate)" : "" ) ;
             exit(1);
         }
@@ -911,6 +910,9 @@ void sequential_loop( BGZF* output )
                     tot_seqs, tdiff( &tv0, &tv1 ));
         }
         pair_aln(&raw);
+        pair_posn(&raw);
+        improve_isize_est(&raw);
+        pair_finish(&raw);
         pair_print_bam(output,&raw);
         bam_destroy_pair(&raw);
     }
@@ -922,14 +924,18 @@ void sequential_loop( BGZF* output )
 
 void set_sockopts( void *socket )
 {
-    zcheck( zmq_setsockopt( socket, ZMQ_HWM, &the_hwm, sizeof(uint64_t) ),
+    zcheck( zmq_setsockopt( socket, ZMQ_SNDHWM, &the_hwm, sizeof(int) ),
+            1, "zmq_setsockopt failed" ) ;
+    zcheck( zmq_setsockopt( socket, ZMQ_RCVHWM, &the_hwm, sizeof(int) ),
             1, "zmq_setsockopt failed" ) ;
 }
 void zmq_xclose( void *socket )
 {
-    int the_linger = 0;
-    zmq_setsockopt( socket, ZMQ_LINGER, &the_linger, sizeof(int) ) ;
-    zmq_close(socket);
+    if( socket ) {
+        int the_linger = 0;
+        zmq_setsockopt( socket, ZMQ_LINGER, &the_linger, sizeof(int) ) ;
+        zmq_close(socket);
+    }
 }
 
 
@@ -947,7 +953,7 @@ void *run_config_service( void *arg )
         zmq_msg_t m ;
         zmq_msg_init(&m) ;
 
-        zterm( zmq_recv(socket, &m, 0), 1, "zmq_recv failed" ) break;
+        zterm( zmq_msg_recv(&m, socket, 0), 1, "zmq_recv failed" ) break;
         
         fprintf( stderr, "[run_config_service] Received hello: %.*s.\n", 
                 (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
@@ -957,7 +963,7 @@ void *run_config_service( void *arg )
         memcpy(zmq_msg_data(&m),                                       gap_opt, sizeof(gap_opt_t));
         memcpy(zmq_msg_data(&m) + sizeof(gap_opt_t),                    pe_opt, sizeof(pe_opt_t));
         memcpy(zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t), prefix, strlen(prefix));
-        zterm( zmq_send(socket, &m, 0), 1, "zmq_send failed" ) break;
+        zterm( zmq_msg_send(&m, socket, 0), 1, "zmq_send failed" ) break;
         zmq_msg_close(&m) ;
     }
 
@@ -965,89 +971,136 @@ void *run_config_service( void *arg )
     return 0;
 }
 
+inline void put_int( unsigned char **p, int x )
+{
+    (*p)[0] = x >>  0 & 0xff ;
+    (*p)[1] = x >>  8 & 0xff ;
+    (*p)[2] = x >> 16 & 0xff ;
+    (*p)[3] = x >> 24 & 0xff ;
+    *p += 4 ;
+}
+
+inline void put_block( unsigned char **p, void *q, size_t s )
+{
+    memcpy( *p, q, s ) ;
+    *p += s ;
+}
+
+
+/** 
+ * Serializes a bam_pair_t, no matter what phase it is in.
+ * We only serialize the valid fields, depending on phase.
+ */
 void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
 {
-    int rc, len = (char*)&p->first - (char*)p ;
-    if( p->kind > 0 ) 
-        len += sizeof(bam1_core_t) + p->first.data_len + sizeof(int)
-            + (p->n_aln1 ? sizeof(bwt_aln1_t) * (p->n_aln1-1) : 0) ;
-
-    if( p->kind > 1 )
-        len += sizeof(bam1_core_t) + p->second.data_len + sizeof(int)
-            + (p->n_aln2 ? sizeof(bwt_aln1_t) * (p->n_aln2-1) : 0) ;
+    // recno, kind, phase, 0-2 bam_recs w/ data_len
+    int rc, i, len = 4 + 1 + 1 ;
+    for( i = 0 ; i != p->kind ; ++i ) {
+        len += sizeof( bam1_core_t ) + 4 + p->bam_rec[i].data_len ;
+        switch( p->phase ) {
+            case pristine: break ;
+            case finished: break ;
+            case positioned: len += 25 ;
+                             // fallthrough!
+            case aligned: len += 8 + p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ;
+                          break ;
+        }
+    }
 
     rc = zmq_msg_init_size(m, len) ;
     xassert (rc == 0, "fail to init message");
 
-    char *q = zmq_msg_data(m);
-    memcpy(q, p, (char*)&p->first - (char*)p);
-    q += (char*)&p->first - (char*)p;
-    if( p->kind > 0 ) {
-        memcpy(q, &p->first.core, sizeof(bam1_core_t)) ;
-        q += sizeof(bam1_core_t) ;
-        memcpy(q, &p->first.data_len, sizeof(int)) ;
-        q += sizeof(int) ;
-        memcpy(q, p->first.data, p->first.data_len);
-        q += p->first.data_len;
-        if(p->n_aln1) {
-            memcpy(q, p->aln1, sizeof(bwt_aln1_t) * (p->n_aln1-1)) ;
-            q += sizeof(bwt_aln1_t) * (p->n_aln1-1) ;
+    unsigned char *q = zmq_msg_data(m);
+    put_int( &q, p->recno ) ;
+    *q++ = p->kind ;
+    *q++ = p->phase ;
+
+    for( i = 0 ; i != p->kind ; ++i ) {
+        put_block( &q, &p->bam_rec[i].core, sizeof( bam1_core_t ) ) ;
+        put_int(   &q,  p->bam_rec[i].data_len ) ;
+        put_block( &q,  p->bam_rec[i].data, p->bam_rec[i].data_len ) ;
+
+        switch( p->phase ) {
+            case pristine:   break ;
+            case finished:   break ;
+            case positioned: *q++ = p->bwa_seq[i].strand << 4 | p->bwa_seq[i].type ;
+                             *q++ = p->bwa_seq[i].n_mm ;
+                             *q++ = p->bwa_seq[i].n_gapo ;
+                             *q++ = p->bwa_seq[i].n_gape ;
+                             *q++ = p->bwa_seq[i].seQ ;
+                             put_int( &q, p->bwa_seq[i].score ) ;
+                             put_int( &q, p->bwa_seq[i].sa ) ;
+                             put_int( &q, p->bwa_seq[i].c1 ) ;
+                             put_int( &q, p->bwa_seq[i].c2 ) ;
+                             put_int( &q, p->bwa_seq[i].pos ) ;
+                             // fallthrough!
+            case aligned:    put_int(   &q, p->bwa_seq[i].max_entries ) ;
+                             put_int(   &q, p->bwa_seq[i].n_aln ) ;
+                             put_block( &q, p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             break ;
         }
     }
-    if( p->kind > 1 ) {
-        memcpy(q, &p->second.core, sizeof(bam1_core_t)) ;
-        q += sizeof(bam1_core_t) ;
-        memcpy(q, &p->second.data_len, sizeof(int)) ;
-        q += sizeof(int) ;
-        memcpy(q, p->second.data, p->second.data_len);
-        q += p->second.data_len;
-        if(p->n_aln2) {
-            memcpy(q, p->aln2, sizeof(bwt_aln1_t) * (p->n_aln2-1)) ;
-            q += sizeof(bwt_aln1_t) * (p->n_aln2-1) ;
-        }
-    }
-    xassert( q == zmq_msg_data(m) + zmq_msg_size(m), "error encoding message" ) ;
+    xassert( q == zmq_msg_data(m) + len, "logic error in msg_init_from_pair" ) ;
 }
+
+inline int get_int( unsigned char **p )
+{
+    *p += 4 ;
+    return (int)(*p)[-1] << 24 |
+           (int)(*p)[-2] << 16 |
+           (int)(*p)[-3] <<  8 |
+           (int)(*p)[-4] <<  0 ;
+}
+
+inline void get_block( unsigned char **p, void *q, size_t s )
+{
+    memcpy( q, *p, s ) ;
+    *p += s ;
+}
+
 
 void pair_init_from_msg(bam_pair_t *p, zmq_msg_t *m)
 {
-    char *q = zmq_msg_data(m);
-    memcpy(p, q, (char*)&p->first - (char*)p);
-    q += (char*)&p->first - (char*)p;
-    if( p->kind > 0 ) {
-        memcpy(&p->first.core, q, sizeof(bam1_core_t)) ;
-        q += sizeof(bam1_core_t) ;
-        memcpy(&p->first.data_len, q, sizeof(int)) ;
-        q += sizeof(int) ;
-        p->first.data = malloc( p->first.data_len );
-        p->first.m_data = p->first.data_len ;
-        memcpy(p->first.data, q, p->first.data_len);
-        q += p->first.data_len;
-        if(p->n_aln1) {
-            p->aln1 = malloc(sizeof(bwt_aln1_t) * (p->n_aln1-1)) ;
-            memcpy(p->aln1, q, sizeof(bwt_aln1_t) * (p->n_aln1-1)) ;
-            q += sizeof(bwt_aln1_t) * (p->n_aln1-1) ;
+    int i ;
+    unsigned char *q = zmq_msg_data(m);
+
+    memset( p, 0, sizeof( bam_pair_t ) ) ;
+    p->recno = get_int( &q ) ;
+    p->kind  = *q++ ;
+    p->phase = *q++ ;
+
+    for( i = 0 ; i != p->kind ; ++i ) {
+        get_block( &q, &p->bam_rec[i].core, sizeof( bam1_core_t ) ) ;
+        p->bam_rec[i].data_len = p->bam_rec[i].m_data = get_int( &q ) ;
+        p->bam_rec[i].data = malloc( p->bam_rec[i].data_len ) ;
+        get_block( &q,  p->bam_rec[i].data, p->bam_rec[i].data_len ) ;
+
+        switch( p->phase ) {
+            case pristine:   break ;
+            case finished:   break ;
+            case positioned: p->bwa_seq[i].strand = *q >> 4 ;
+                             p->bwa_seq[i].type   = *q++ & 0xff ;
+                             p->bwa_seq[i].n_mm   = *q++ ;
+                             p->bwa_seq[i].n_gapo = *q++ ;
+                             p->bwa_seq[i].n_gape = *q++ ;
+                             p->bwa_seq[i].seQ    = *q++ ;
+                             p->bwa_seq[i].score  = get_int( &q ) ;
+                             p->bwa_seq[i].sa     = get_int( &q ) ;
+                             p->bwa_seq[i].c1     = get_int( &q ) ;
+                             p->bwa_seq[i].c2     = get_int( &q ) ;
+                             p->bwa_seq[i].pos    = get_int( &q ) ;
+                             // fallthrough!
+            case aligned:    p->bwa_seq[i].max_entries = get_int( &q ) ;
+                             p->bwa_seq[i].n_aln       = get_int( &q ) ;
+                             p->bwa_seq[i].aln         = malloc( p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             get_block( &q,  p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             break ;
         }
     }
-    if( p->kind > 1 ) {
-        memcpy(&p->second.core, q, sizeof(bam1_core_t)) ;
-        q += sizeof(bam1_core_t) ;
-        memcpy(&p->second.data_len, q, sizeof(int)) ;
-        q += sizeof(int) ;
-        p->second.data = malloc( p->second.data_len );
-        p->second.m_data = p->second.data_len ;
-        memcpy(p->second.data, q, p->second.data_len);
-        q += p->second.data_len;
-        if(p->n_aln2) {
-            p->aln2 = malloc(sizeof(bwt_aln1_t) * (p->n_aln2-1)) ;
-            memcpy(p->aln2, q, sizeof(bwt_aln1_t) * (p->n_aln2-1)) ;
-            q += sizeof(bwt_aln1_t) * (p->n_aln2-1) ;
-        }
-    }
-    xassert( q == zmq_msg_data(m) + zmq_msg_size(m), "error decoding message" ) ;
+    xassert( q == (unsigned char*)zmq_msg_data(m) + zmq_msg_size(m), "error decoding message" ) ;
 }
 
-void *run_reader_thread( void *socket )
+void *run_reader_thread( void* socket )
 {
     int recno = 0, rc=0;
     bam_pair_t raw;
@@ -1060,24 +1113,25 @@ void *run_reader_thread( void *socket )
                     rc==-2 ? "(lone mate)" : "" ) ;
             exit(1);
         }
-        if(rc==0) break ;
 
         raw.recno = recno++; 
         if(!(recno%CHUNKSIZE)) fprintf( stderr, "[run_reader_thread] %d records read so far.\n", recno );
         msg_init_from_pair( &msg, &raw );
         bam_destroy_pair(&raw);
-        zterm( zmq_send(socket, &msg, 0), 1, "zmq_send failed" ) break;
+        zterm( zmq_msg_send(&msg, socket, 0), 1, "zmq_send failed" ) break;
         zmq_msg_close(&msg);
     }
 
-    bam_init_pair(&raw);
-    raw.kind = eof_marker;
-    raw.recno = recno++;
-    msg_init_from_pair( &msg, &raw );
-    bam_destroy_pair(&raw);
-    zterm( zmq_send(socket, &msg, 0), 0, "zmq_send failed" );
-    fprintf( stderr, "[run_reader_thread] finished, %d records in total.\n", recno );
-    zmq_msg_close(&msg);
+    if(!s_interrupted) {
+        bam_init_pair(&raw);
+        raw.kind = eof_marker;
+        raw.recno = recno++;
+        msg_init_from_pair( &msg, &raw );
+        bam_destroy_pair(&raw);
+        zterm( zmq_msg_send(&msg, socket, 0), 0, "zmq_send failed" );
+        fprintf( stderr, "[run_reader_thread] finished, %d records in total.\n", recno );
+        zmq_msg_close(&msg);
+    }
     zmq_close(socket);
     return 0;
 }
@@ -1085,15 +1139,16 @@ void *run_reader_thread( void *socket )
 void *run_output_thread( BGZF *output, void* socket )
 {
     struct timeval tv0, tv1 ;
-    gettimeofday( &tv0, 0 ) ;
     int lastrn = 0 ;
     double rate = -1 ;
+
+    gettimeofday( &tv0, 0 ) ;
     while (!s_interrupted) 
     {
         zmq_msg_t msg;
         bam_pair_t pair;
         zmq_msg_init(&msg);
-        zterm( zmq_recv(socket, &msg, 0), 1, "zmq_recv failed" ) break;
+        zterm( zmq_msg_recv(&msg, socket, 0), 1, "zmq_recv failed" ) break;
         pair_init_from_msg(&pair, &msg);
         zmq_msg_close(&msg);
         if(!pair.kind) break ;
@@ -1124,10 +1179,15 @@ void *run_output_thread( BGZF *output, void* socket )
 // We bind to inproc://work_{in,out}.  When running standalone, the
 // other end is the I/O multiplexor, when running as worker process, the
 // other end is a streaming device.
+//
+// XXX Needs to be split into a lean-memory and a full version; needs to
+//     switch depending on whether ISIZE info is available; needs to
+//     switch on message type.
 void *run_worker_thread( void *arg )
 {
     zmq_msg_t msg;
     bam_pair_t pair;
+    int rc;
     void *incoming = zmq_socket( zmq_context, ZMQ_PULL ) ;
     void *outgoing = zmq_socket( zmq_context, ZMQ_PUSH ) ;
     xassert(incoming, "error creating socket");
@@ -1139,19 +1199,23 @@ void *run_worker_thread( void *arg )
     zcheck( zmq_connect( outgoing, "inproc://work_in"  ), 1, "zmq_connect failed" );
     do {
         zmq_msg_init(&msg);
-        if( 0>zmq_recv(incoming, &msg, 0) ) {
+        if( 0>zmq_msg_recv(&msg, incoming, 0) ) {
             // clean exit if we got terminated here
             if( zmq_errno() == ETERM || zmq_errno() == EINTR ) break ;
-            fprintf( stderr, "zmq_recv failed: %s\n", zmq_strerror( zmq_errno() ) ) ;
+            fprintf( stderr, "zmq_msg_recv failed: %s\n", zmq_strerror( zmq_errno() ) ) ;
             exit(1) ;
         }
         pair_init_from_msg(&pair, &msg);
         zmq_msg_close(&msg);
         pair_aln(&pair);
+        pair_posn(&pair);
+        improve_isize_est(&pair);
+        pair_finish(&pair);
         msg_init_from_pair(&msg,&pair);
         bam_destroy_pair(&pair);
-        zterm( zmq_send(outgoing, &msg, 0), 1, "zmq_send failed" ) break;
+        rc = zmq_msg_send(&msg, outgoing, 0);
         zmq_msg_close(&msg);
+        zterm( rc, 1, "zmq_msg_send failed" ) break;
     } while(pair.kind) ;
     fprintf( stderr, "[run_worker_thread] exiting.\n" ) ;
     zmq_close(outgoing);
@@ -1165,13 +1229,14 @@ void *run_worker_thread( void *arg )
 //
 // The ring buffer contains records of type bam_pair_t.  A record with
 // kind==0 and isdone==0 is invalid.  A record with kind==0 and
-// isdone==1 is the end marker.  Other records are either unacknowledged
+// isdone==done is the end marker.  Other records are either unacknowledged
 // or acknowledged work packets.
 //
 // FIXME: For the time being, the sliding window has a fixed size.
 //        Don't know yet how to make this more dynamic.
 void *run_io_multiplexor( void* arg )
 {
+    void **workio = arg ;
     // Let's see... we're multiplexing between four sockets:
     // - input from BAM         (incoming_bam)
     // - output to BAM          (outgoing_bam)
@@ -1212,12 +1277,12 @@ void *run_io_multiplexor( void* arg )
 
     zmq_pollitem_t polls[] = {
         { socket : incoming_bam, fd : 0, events :  ZMQ_POLLIN, revents : 0 },
-        { socket :     work_out, fd : 0, events :           0, revents : 0 },
-        { socket :      work_in, fd : 0, events :  ZMQ_POLLIN, revents : 0 }
+        { socket :    workio[1], fd : 0, events :           0, revents : 0 },
+        { socket :    workio[0], fd : 0, events :  ZMQ_POLLIN, revents : 0 }
     } ;
 
     while (!s_interrupted) {
-        xassert( current_done + current_undone + current_invalid == ring_size, "logic error in queueing thread" ) ;
+        xassert( current_done + current_undone + current_invalid == ring_size, "logic error in queueing thread (1)" ) ;
         gettimeofday( &tv1, 0 ) ;
         if( loudness >= 2 || tdiff(&tv0,&tv1) >= 10 ) {
             fprintf( stderr, "[run_io_multiplexor] polling -- %d records received, "
@@ -1229,6 +1294,7 @@ void *run_io_multiplexor( void* arg )
             fprintf( stderr, "next expected: %d, next free: %d\n", next_expected % ring_size, next_free % ring_size ) ; 
 
         zterm( zmq_poll( polls, 3, -1 ), 1, "zmq_poll failed" ) break;
+        if( s_interrupted ) break ;
 
         // next time, do not poll for input
         polls[0].events = 0 ;
@@ -1239,11 +1305,11 @@ void *run_io_multiplexor( void* arg )
         //   guaranteed to be ready.)
         if( polls[0].revents & ZMQ_POLLIN) { // input available
             // the buffer should not be full (otherwise it's a logic error)
-            xassert( (next_free+1) % ring_size != next_expected % ring_size, "logic error in queueing thread" ) ;
+            xassert( (next_free+1) % ring_size != next_expected % ring_size, "logic error in queueing thread (2)" ) ;
             if( loudness >= 3 ) fprintf( stderr, "got input record.\n" ) ;
             zmq_msg_t msg ;
             zmq_msg_init( &msg ) ;
-            zterm( zmq_recv( incoming_bam, &msg, 0 ), 1, "zmq_recv failed" ) break;
+            zterm( zmq_msg_recv( &msg, incoming_bam, 0 ), 1, "zmq_recv failed" ) break;
 
             // input comes ordered, so the correct slot should be
             // (next_free)
@@ -1253,21 +1319,22 @@ void *run_io_multiplexor( void* arg )
                 bam_pair_t p;
                 pair_init_from_msg( &p, &msg ) ;
                 fprintf( stderr, "%d != %d\n", next_free, *(int*)zmq_msg_data(&msg) ) ;
-                fprintf( stderr, "kind == %d, isdone == %d, recno == %d\n", p.kind, p.isdone, p.recno ) ;
+                fprintf( stderr, "kind == %d, isdone == %d, recno == %d\n", p.kind, p.phase, p.recno ) ;
                 exit(2);
             }
 
-            xassert( !ringbuf[next_free % ring_size].kind && !ringbuf[next_free % ring_size].isdone, "logic error in queueing thread" ) ;
+            xassert( !ringbuf[next_free % ring_size].kind && ringbuf[next_free % ring_size].phase < positioned,
+                     "logic error in queueing thread (3)" ) ;
             pair_init_from_msg( &ringbuf[next_free % ring_size], &msg ) ;
             current_invalid-- ;
             if( ringbuf[next_free % ring_size].kind ) {
-                total_in++ ;
+                total_in += ringbuf[next_free % ring_size].kind ;
                 if( !current_undone ) next_resend = next_free % ring_size;
                 current_undone++ ;
                 if( loudness >= 3 )
                     fprintf( stderr, "received recno %d (%d), will send.\n",
                              ringbuf[next_free % ring_size].recno, ringbuf[next_free % ring_size].kind ) ;
-                zterm( zmq_send( work_out, &msg, 0 ), 1, "zmq_send failed" ) break;
+                zterm( zmq_msg_send( &msg, workio[1], 0 ), 1, "zmq_send failed" ) break;
 
                 polls[1].events = ZMQ_POLLOUT ;
                 next_free++;
@@ -1276,7 +1343,8 @@ void *run_io_multiplexor( void* arg )
                 // How to shut down?
                 // - If EOF arrives from input, we shut down input and enqueue the
                 //   EOF marker (as already acknowledged).
-                ringbuf[next_free % ring_size].isdone = done ;
+                ringbuf[next_free % ring_size].phase = finished ;
+                xassert( incoming_bam, "repeated closing of incoming_bam" ) ;
                 zmq_close( incoming_bam ) ;
                 incoming_bam = 0 ;
                 polls[0].socket = 0 ;
@@ -1300,10 +1368,10 @@ void *run_io_multiplexor( void* arg )
                             ringbuf[next_resend].recno, ringbuf[next_resend].kind ) ;
                     zmq_msg_t msg ;
                     msg_init_from_pair( &msg, &ringbuf[next_resend] ) ;
-                    zterm( zmq_send( work_out, &msg, 0 ), 1, "zmq_send failed" ) break;
+                    zterm( zmq_msg_send( &msg, workio[1], 0 ), 1, "zmq_send failed" ) break;
 
                     do next_resend = (next_resend+1) % ring_size ;
-                    while( ringbuf[next_resend].isdone == done || !ringbuf[next_resend].kind ) ;
+                    while( ringbuf[next_resend].phase >= positioned || !ringbuf[next_resend].kind ) ;
                     total_resends++ ;
                 }
             }
@@ -1317,26 +1385,30 @@ void *run_io_multiplexor( void* arg )
             if( loudness >= 3 ) fprintf( stderr, "work done.\n" ) ;
             zmq_msg_t msg ;
             zmq_msg_init( &msg ) ;
-            zterm( zmq_recv( work_in, &msg, 0 ), 1, "zmq_recv failed" ) break;
+            zterm( zmq_msg_recv( &msg, workio[0], 0 ), 1, "zmq_recv failed" ) break;
             
             rn = *(int*)zmq_msg_data(&msg) ;
             if( loudness >= 3 ) fprintf( stderr, "[run_io_multiplexor] received record %d.\n", rn ) ;
             if( rn < next_expected ) {
                 if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this is old shit: %d.\n", rn ) ;
                 total_dups++ ;
+                zmq_msg_close(&msg ) ;
             }
             else if( rn >= next_free ) {
                 if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this comes from the future: %d.\n", rn ) ;
+                zmq_msg_close(&msg ) ;
             }
-            else if( ringbuf[rn % ring_size].isdone ) {
+            else if( ringbuf[rn % ring_size].phase >= positioned ) {
                 if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this is a duplicate: %d.\n", rn ) ;
                 total_dups++ ;
+                zmq_msg_close(&msg ) ;
             }
             else {
                 if( loudness >= 3 ) fprintf( stderr, "this is not a duplicate, dealing with it\n" ) ;
                 bam_destroy_pair( &ringbuf[ rn % ring_size ] ) ;
                 pair_init_from_msg( &ringbuf[ rn % ring_size ], &msg ) ;
-                ringbuf[ rn % ring_size ].isdone = done ;
+                // I think this is implicit now:
+                xassert( ringbuf[ rn % ring_size ].phase >= positioned, "wrong phase marker" ) ;
                 xassert( ringbuf[ rn % ring_size ].kind, "wrong record type in queue" ) ;
                 zmq_msg_close(&msg ) ;
                 current_undone-- ;
@@ -1345,10 +1417,11 @@ void *run_io_multiplexor( void* arg )
 received_one:
                 if( current_undone && next_resend == rn % ring_size ) 
                     do next_resend = (next_resend+1) % ring_size ;
-                    while( ringbuf[next_resend].isdone == done || !ringbuf[next_resend].kind ) ;
+                    while( ringbuf[next_resend].phase >= positioned || !ringbuf[next_resend].kind ) ;
 
                 int foo = 0 ;
-                while( next_expected % ring_size != next_free % ring_size && ringbuf[next_expected % ring_size].isdone == done )
+                while( next_expected % ring_size != next_free % ring_size &&
+                        ringbuf[next_expected % ring_size].phase >= positioned )
                 {
                     int mykind = ringbuf[next_expected % ring_size].kind ;
                     if( loudness >= 3 ) fprintf( stderr, "next expected: %d, next free: %d\n",
@@ -1359,11 +1432,14 @@ received_one:
                     msg_init_from_pair( &msg, &ringbuf[next_expected % ring_size] ) ;
                     bam_destroy_pair( &ringbuf[next_expected % ring_size] ) ;
                     ringbuf[next_expected % ring_size].kind = 0 ; 
-                    ringbuf[next_expected % ring_size].isdone = 0 ;
+                    ringbuf[next_expected % ring_size].phase = pristine ; 
+                    // shouldn't this be implicit now:
+                    // ringbuf[next_expected % ring_size].phase = pristine ;
 
-                    zterm( zmq_send( outgoing_bam, &msg, 0 ), 1, "zmq_send failed" ) goto break2;
+                    // this should be dispatched based on message phase
+                    zterm( zmq_msg_send( &msg, outgoing_bam, 0 ), 1, "zmq_send failed" ) goto break2;
                     zmq_msg_close(&msg) ;
-                    total_out++;
+                    total_out+=mykind;
                     current_done--;
                     current_invalid++;
 
@@ -1373,14 +1449,14 @@ received_one:
                     if( !mykind ) goto break2 ;
                     next_expected++ ;
                     if( loudness >= 4 ) fprintf( stderr, "spinning(1)\n" ) ;
-                    xassert( foo++ < ring_size, "logic error in queueing thread" ) ;
+                    xassert( foo++ < ring_size, "logic error in queueing thread (4)" ) ;
                 }
 
                 if( current_undone ) {
                     int foo = 0 ;
-                    while( ringbuf[next_resend].isdone == done ) {
+                    while( ringbuf[next_resend].phase >= positioned ) {
                         next_resend = (next_resend+1) % ring_size ;
-                        xassert( foo++ < ring_size, "logic error in queueing thread" ) ;
+                        xassert( foo++ < ring_size, "logic error in queueing thread (5)" ) ;
                     }
                 }
             }
@@ -1389,16 +1465,11 @@ received_one:
 break2:
     fprintf( stderr, "[run_io_multiplexor] finished: %d records in total, %d resends, %d dups.\n",
             total_out, total_resends, total_dups ) ;
-    if( listen_port ) {
-        zmq_xclose( work_out ) ;
-        zmq_xclose( work_in ) ;
-    }
-    else {
-        zmq_close( work_out ) ;
-        zmq_close( work_in ) ;
-    }
     zmq_xclose( incoming_bam ) ;
     zmq_xclose( outgoing_bam ) ;
+    zmq_xclose( workio[0] ) ;
+    zmq_xclose( workio[1] ) ;
+    free( ringbuf ) ;
     return 0 ;
 }
 
@@ -1436,20 +1507,16 @@ void bwa_bam2bam_core( const char *prefix, BGZF *output )
     } else if( gap_opt->n_threads == 1 && !listen_port ) {
         sequential_loop( output ) ;
     } else {
+        void *workio[2] ;
+        int n;
         pthread_t config_service_tid ;
         pthread_t reader_tid ;
         pthread_t mux_tid ;
-        pthread_t *worker_tid ;
 
         // Okay, we need 0MQ.
         s_catch_signals();
         zmq_context = zmq_init(1) ;
         xassert( zmq_context, "0MQ init failed" ) ;
-
-        void *bam_out = zmq_socket( zmq_context, ZMQ_PULL ) ;
-        xassert(bam_out, "couldn't create socket");
-        set_sockopts(bam_out);
-        zcheck( zmq_bind( bam_out, "inproc://bam_out" ), 1, "zmq_bind failed" );
 
         void *broadcast = zmq_socket( zmq_context, ZMQ_PUB ) ;
         xassert(broadcast, "couldn't create socket");
@@ -1459,49 +1526,53 @@ void bwa_bam2bam_core( const char *prefix, BGZF *output )
         if( listen_port ) {
             char addr[100] ;
             pthread_create( &config_service_tid, 0, run_config_service, 0 ) ;
+            pthread_detach( config_service_tid ) ;
             snprintf( addr, 100, "tcp://*:%d", listen_port+3 ) ;
             zcheck( zmq_bind( broadcast, addr ), 1, "zmq_bind failed" );
             set_sockopts( broadcast ) ;
         }
 
-        // Start reading in the background...
-        void *bam_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
-        xassert(bam_in, "couldn't create socket");
-        set_sockopts(bam_in);
-
-        zcheck( zmq_bind( bam_in, "inproc://bam_in" ), 1, "zmq_bind failed" );
-        pthread_create( &reader_tid, 0, run_reader_thread, bam_in );
-
-        work_out = zmq_socket( zmq_context, ZMQ_PUSH ) ;
-        work_in  = zmq_socket( zmq_context, ZMQ_PULL ) ;
+        workio[0] = zmq_socket( zmq_context, ZMQ_PULL ) ;
+        workio[1] = zmq_socket( zmq_context, ZMQ_PUSH ) ;
         
-        set_sockopts(work_out);
-        set_sockopts(work_in);
+        set_sockopts(workio[1]);
+        set_sockopts(workio[0]);
 
-        zcheck( zmq_bind( work_out, "inproc://work_out" ), 1, "zmq_bind failed" );
-        zcheck( zmq_bind( work_in, "inproc://work_in" ), 1, "zmq_bind" );
+        zcheck( zmq_bind( workio[1], "inproc://work_out" ), 1, "zmq_bind failed" );
+        zcheck( zmq_bind( workio[0], "inproc://work_in" ), 1, "zmq_bind" );
         
         if( listen_port ) {
             char addr[100] ;
             snprintf( addr, 100, "tcp://*:%d", listen_port+1 ) ;
-            zcheck( zmq_bind( work_out, addr ), 1, "zmq_bind failed" );
+            zcheck( zmq_bind( workio[1], addr ), 1, "zmq_bind failed" );
             snprintf( addr, 100, "tcp://*:%d", listen_port+2 ) ;
-            zcheck( zmq_bind( work_in, addr ), 1, "zmq_bind failed" );
+            zcheck( zmq_bind( workio[0], addr ), 1, "zmq_bind failed" );
         }
+
+        void *bam_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
+        xassert(bam_in, "couldn't create socket");
+        set_sockopts(bam_in);
+        zcheck( zmq_bind( bam_in, "inproc://bam_in" ), 1, "zmq_bind failed" );
+
+        // Start reading in the background...
+        pthread_create( &reader_tid, 0, run_reader_thread, bam_in );
+        pthread_detach( reader_tid ) ;
 
         // Are threads requested?  Then fire them up.
-        if( gap_opt->n_threads ) {
-            int n;
-            worker_tid = calloc( gap_opt->n_threads, sizeof(pthread_t) ) ;
-            xassert( worker_tid, "out of momory" ) ;
-
-            for(n=0;n!=gap_opt->n_threads;++n)
-                // Hmm, arguments?
-                pthread_create(worker_tid+n, 0, run_worker_thread, 0 ) ;
+        for(n=0;n!=gap_opt->n_threads;++n) {
+            pthread_t worker_tid ;
+            pthread_create(&worker_tid, 0, run_worker_thread, 0 ) ;
+            pthread_detach(worker_tid);
         }
 
+        void *bam_out = zmq_socket( zmq_context, ZMQ_PULL ) ;
+        xassert(bam_out, "couldn't create socket");
+        set_sockopts(bam_out);
+        zcheck( zmq_bind( bam_out, "inproc://bam_out" ), 1, "zmq_bind failed" );
+
         // ...multiplex records between I/O and workers...
-        pthread_create( &mux_tid, 0, run_io_multiplexor, 0 );
+        pthread_create( &mux_tid, 0, run_io_multiplexor, workio );
+        pthread_detach( mux_tid ) ;
 
         // ...and shift to output in the foreground.
         run_output_thread( output, bam_out );
@@ -1513,12 +1584,12 @@ void bwa_bam2bam_core( const char *prefix, BGZF *output )
         zmq_msg_t finmsg ;
         zmq_msg_init_data( &finmsg, "go away", 7, 0, 0 ) ;
         fprintf( stderr, "[bwa_bam2bam_core] sending termination signal\n" ) ;
-        zcheck( zmq_send( broadcast, &finmsg, 0 ), 1, "zmq_send failed" ) ;
+        zcheck( zmq_msg_send( &finmsg, broadcast, 0 ), 1, "zmq_send failed" ) ;
         fprintf( stderr, "[bwa_bam2bam_core] done, waiting for clean shutdown\n" ) ;
+
         zmq_xclose( broadcast ) ;
         zmq_term( zmq_context ) ;
     }
-
 	if (pac) bwt_destroy_pac(pac,bns);
 	if (ntbns) bns_destroy(ntbns);
 	if (bns) bns_destroy(bns);
@@ -1716,14 +1787,14 @@ void bwa_worker_core( int nthreads, char* host, int port )
 
     zcheck( zmq_setsockopt( socks[4], ZMQ_SUBSCRIBE, "", 0 ), 1, "subscription failed" ) ;
 
-    pthread_t *worker_tid ;
     int n;
-    worker_tid = calloc( nthreads, sizeof(pthread_t) ) ;
-    xassert( worker_tid, "out of memory" ) ;
+    for(n=0;n!=nthreads;++n) {
+        pthread_t worker_tid ;
+        pthread_create(&worker_tid, 0, run_worker_thread, 0 ) ;
+        pthread_detach(worker_tid);
+    }
 
-    for(n=0;n!=nthreads;++n)
-        pthread_create(worker_tid+n, 0, run_worker_thread, 0 ) ;
-
+    // This device relays stuff from work_out back to the network.
     pthread_t fan_out ;
     pthread_create( &fan_out, 0, run_device, socks ) ;
 
@@ -1737,24 +1808,24 @@ void bwa_worker_core( int nthreads, char* host, int port )
     int npoll=0;
     zmq_msg_t m ;
     zmq_msg_init(&m) ;
-    while (!s_interrupted && time(0) - start_time < 90*60) {
-        npoll = zmq_poll( pitems, 2, 1E6 * timeout ) ;
+    while (!s_interrupted && time(0) - start_time < max_run_time*60) {
+        npoll = zmq_poll( pitems, 2, 1E3 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
 
         if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) break ;
-        zterm( zmq_recv( socks[2], &m, 0 ), 1, "zmq_recv failed" ) break;
+        zterm( zmq_msg_recv( &m, socks[2], 0 ), 1, "zmq_recv failed" ) break;
 
-        npoll = zmq_poll( pitems+1, 2, 1E6 * timeout ) ;
+        npoll = zmq_poll( pitems+1, 2, 1E3 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
 
         if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) break ;
-        zterm( zmq_send( socks[3], &m, 0 ), 1, "zmq_send failed" ) break;
+        zterm( zmq_msg_send( &m, socks[3], 0 ), 1, "zmq_send failed" ) break;
     }
 
     if( npoll==0 )
         fprintf( stderr, "[bwa_worker_core] No work delivered in %ds.  Terminating.\n", timeout ) ;
     else if( pitems[1].revents & ZMQ_POLLIN ) {
-        zmq_recv( socks[4], &m, 0 );
+        zmq_msg_recv( &m, socks[4], 0 );
         fprintf( stderr, "[bwa_worker_core] Received termination signal: \"%.*s\".\n",
                 (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
     } else if( s_interrupted ) 
@@ -1764,6 +1835,9 @@ void bwa_worker_core( int nthreads, char* host, int port )
                 (int)(time(0) - start_time) / 60 ) ;
 
     zmq_msg_close(&m);
+
+    pthread_cancel( fan_out ) ;
+    pthread_join( fan_out, 0 ) ;
     zmq_xclose(socks[4]) ;
     zmq_xclose(socks[3]) ;
     zmq_close(socks[2]) ;
@@ -1789,15 +1863,28 @@ void bwa_worker_core( int nthreads, char* host, int port )
 
 int bwa_worker( int argc, char *argv[] )
 {
-    if( argc != 4 ) {
-		fprintf(stderr, "\n");
-		fprintf(stderr, "Usage:   bwa worker <nthreads> <host> <port>\n\n");
-        return 1;
+    int c, nthreads = 1, port = 0 ;
+    char *host = "localhost" ;
+
+	while ((c = getopt_long(argc, argv, "t:h:p:T:", workeropts, 0)) >= 0) {
+		switch (c) {
+            case 't': nthreads = atoi(optarg) ; break ;
+            case 'h': host = optarg ; break ;
+            case 'p': port = atoi(optarg) ; break ;
+            case 'T': max_run_time = atoi(optarg) ; break ;
+            default: return 1;
+        }
     }
 
-    int nthreads = atoi( argv[1] ) ;
-    char *host = argv[2] ;
-    int port = atoi( argv[3] ) ;
+    if( optind != argc ) {
+		fprintf(stderr, "\n");
+		fprintf(stderr, "Usage:   bwa worker [options]\n\n") ;
+		fprintf(stderr, "Options: -t, --num-threads NUM             number of worker threads [%d]\n", nthreads);
+        fprintf(stderr, "         -h, --host HOST                   host to connect to [%s]\n", host);
+        fprintf(stderr, "         -p, --port NUM                    port to connect to [%d]\n", port);
+        fprintf(stderr, "         -T, --timeout NUM                 terminate after NUM minutes [%d]\n", max_run_time);
+        return 1;
+    }
 
     zmq_context = zmq_init(1) ;
     xassert( zmq_context, "0MQ init failed" ) ;
@@ -1812,10 +1899,10 @@ int bwa_worker( int argc, char *argv[] )
     zmq_msg_t m;
     zmq_msg_init_size(&m,20);
     gethostname( zmq_msg_data(&m), 20 ) ;
-    zcheck( zmq_send(conf_sock, &m, 0), 1, "zmq_send failed" );
+    zcheck( zmq_msg_send(&m, conf_sock, 0), 1, "zmq_send failed" );
     zmq_msg_close(&m);
     zmq_msg_init(&m);
-    zcheck( zmq_recv(conf_sock, &m, 0), 1, "zmq_recv failed" );
+    zcheck( zmq_msg_recv(&m, conf_sock, 0), 1, "zmq_recv failed" );
     zmq_xclose(conf_sock);
 
     int plen = zmq_msg_size(&m) - sizeof(gap_opt_t) - sizeof(pe_opt_t) ;

@@ -319,31 +319,21 @@ static void memswap(void *pp, void *qq, size_t s)
     }
 }
 
-void try_get_sai( FILE **f, int c, int *naln, bwt_aln1_t **aln )
+int try_get_sai( FILE **f, int c, int *naln, bwt_aln1_t **aln )
 {
-    uint32_t n_aln;
-    bwt_aln1_t *alns;
-
     if( f && f[c] ) {
-        if( 1 == fread(&n_aln, 4, 1, f[c]) ) {
-            if (!n_aln) {
-                *naln = 1 ;
-                return ;
-            }
-            else {
-				alns = (bwt_aln1_t*)calloc(n_aln, sizeof(bwt_aln1_t));
-                if( n_aln == fread(alns, sizeof(bwt_aln1_t), n_aln, f[c]) ) {
-                    *naln = n_aln+1 ;
-                    *aln = alns ;
-                    return ;
-                }
-                free(alns) ;
-			}
+        if( 1 == fread(naln, 4, 1, f[c]) ) {
+            *aln = (bwt_aln1_t*)calloc(*naln, sizeof(bwt_aln1_t));
+            if( *naln == fread(*aln, sizeof(bwt_aln1_t), *naln, f[c]) ) return 1 ;
+            free(*aln) ;
         }
         fprintf( stderr, "[read_bam_pair] note: sai file %d has ended.\n", c ) ;
         fclose(f[c]);
         f[c]=0;
     }
+    *aln = 0 ;
+    *naln = 0 ;
+    return 0 ;
 }
 
 /* Read one pair from a bam file.  Returns 1 if we got a singleton, 2 if
@@ -352,72 +342,143 @@ void try_get_sai( FILE **f, int c, int *naln, bwt_aln1_t **aln )
  * fragment with unexpected PE flags).
  * XXX  Right now, we don't know if reading the bam file went smoothly.
  *      The clean way to fix that is to use a completely different bam
- *      library.
+ *      library (to be written).
  */
-int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken)
+static int read_bam_pair_core(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken)
 {
     memset(pair, 0, sizeof(bam_pair_t)) ;
-	if (bam_read1(bs->fp, &pair->first) < 0) return 0 ;
+	if (bam_read1(bs->fp, &pair->bam_rec[0]) < 0) return 0 ;
     while(1) {
-        if (pair->first.core.flag & BAM_FPAIRED) { // paired read, get another
-            if (bam_read1(bs->fp, &pair->second) >= 0) {
-                uint32_t flag1 = pair->first.core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
-                uint32_t flag2 = pair->second.core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
-                if (!strcmp(bam1_qname(&pair->first), bam1_qname(&pair->second))) { // actual mates
-                    // make sure that either none or both pass QC
-                    pair->first.core.flag |= pair->second.core.flag & SAM_FQC ;
-                    pair->second.core.flag |= pair->first.core.flag & SAM_FQC ;
-
+        if (pair->bam_rec[0].core.flag & BAM_FPAIRED) { // paired read, get another
+            if (bam_read1(bs->fp, &pair->bam_rec[1]) >= 0) {
+                uint32_t flag1 = pair->bam_rec[0].core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
+                uint32_t flag2 = pair->bam_rec[1].core.flag & (BAM_FPAIRED|BAM_FREAD1|BAM_FREAD2);
+                if (!strcmp(bam1_qname(&pair->bam_rec[0]), bam1_qname(&pair->bam_rec[1]))) { // actual mates
                     if( flag1 == (BAM_FPAIRED|BAM_FREAD1) && flag2 == (BAM_FPAIRED|BAM_FREAD2) ) { // correct order
-                        try_get_sai( bs->sai, 1, &pair->n_aln1, &pair->aln1 ) ;
-                        try_get_sai( bs->sai, 2, &pair->n_aln2, &pair->aln2 ) ;
                         pair->kind = proper_pair ;
                         return 2 ;
                     } else if (flag2 == (BAM_FPAIRED|BAM_FREAD1) && flag1 == (BAM_FPAIRED|BAM_FREAD2) ) { // reverse order
-                        memswap(&pair->first, &pair->second, sizeof(bam1_t));
-                        try_get_sai( bs->sai, 2, &pair->n_aln1, &pair->aln1 ) ;
-                        try_get_sai( bs->sai, 1, &pair->n_aln2, &pair->aln2 ) ;
+                        memswap(&pair->bam_rec[0], &pair->bam_rec[1], sizeof(bam1_t));
                         pair->kind = proper_pair ;
                         return 2 ;
                     } else {
-                        fprintf( stderr, "[read_bam_pair] got a pair, but the flags are wrong (%s).\n", bam1_qname(&pair->first) ) ;
+                        fprintf( stderr, "[read_bam_pair] got a pair, but the flags are wrong (%s).\n", bam1_qname(&pair->bam_rec[0]) ) ;
                         if( allow_broken ) {
-                            pair->first.core.flag &= ~BAM_FREAD2;
-                            pair->first.core.flag |= BAM_FPAIRED|BAM_FREAD1;
-                            pair->second.core.flag &= ~BAM_FREAD1;
-                            pair->second.core.flag |= BAM_FPAIRED|BAM_FREAD2;
-                            try_get_sai( bs->sai, 1, &pair->n_aln1, &pair->aln1 ) ;
-                            try_get_sai( bs->sai, 2, &pair->n_aln2, &pair->aln2 ) ;
+                            pair->bam_rec[0].core.flag &= ~BAM_FREAD2;
+                            pair->bam_rec[0].core.flag |= BAM_FPAIRED|BAM_FREAD1;
+                            pair->bam_rec[1].core.flag &= ~BAM_FREAD1;
+                            pair->bam_rec[1].core.flag |= BAM_FPAIRED|BAM_FREAD2;
                             pair->kind = proper_pair ;
                             return 2 ;
                         }
                         else return -2 ;
                     }
                 } else {
+                    // XXX This is arguably wrong, we discard a lone mate.  But what else could we do?  Buffering it
+                    //     somewhere to wait is too hard for the time being, returning it as a single means we need to buffer the
+                    //     next one.  Not very appealing.
                     fprintf( stderr, "[read_bam_pair] got two reads, but the names don't match (%s,%s).\n",
-                            bam1_qname(&pair->first), bam1_qname(&pair->second) ) ;
-                    try_get_sai( bs->sai, flag1 & BAM_FREAD1 ? 1 : 2, &pair->n_aln1, &pair->aln1 ) ;
-                    free(pair->first.data);
-                    if(pair->n_aln1) free(pair->aln1);
+                            bam1_qname(&pair->bam_rec[0]), bam1_qname(&pair->bam_rec[1]) ) ;
+                    try_get_sai( bs->sai, flag1 & BAM_FREAD1 ? 1 : 2, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) ;
+                    free(pair->bam_rec[0].data);
+                    if(pair->bwa_seq[0].n_aln) free(pair->bwa_seq[0].aln);
                     if( !allow_broken ) {
-                        free(pair->second.data);
-                        if(pair->n_aln2) free(pair->aln2);
+                        free(pair->bam_rec[1].data);
+                        if(pair->bwa_seq[0].n_aln) free(pair->bwa_seq[0].aln);
                         return -2 ;
                     }
-                    memmove(&pair->first, &pair->second, sizeof(bam1_t));
-                    memset(&pair->second, 0, sizeof(bam1_t));
+                    memmove(&pair->bam_rec[0], &pair->bam_rec[1], sizeof(bam1_t));
+                    memset(&pair->bam_rec[1], 0, sizeof(bam1_t));
                 }
             } else {
                 fprintf( stderr, "[read_bam_pair] got a paired read and hit EOF.\n" ) ;
-                free(pair->first.data);
-                if(pair->n_aln1) free(pair->aln1);
+                free(pair->bam_rec[0].data);
+                if(pair->bwa_seq[0].n_aln) free(pair->bwa_seq[0].aln);
                 return allow_broken ? 0 : -2 ;
             }
         } else { // singleton read
             pair->kind = singleton ;
-            try_get_sai( bs->sai, 0, &pair->n_aln1, &pair->aln1 ) ;
             return 1 ;
         }
     }
 }
 
+// Erase unwanted tagged fields:
+// AM NM CM SM MD X0 X1 XA XC XG XM XN XO XT YQ
+static void erase_unwanted_tags(bam1_t *out)
+{
+    int total = out->core.n_cigar*4 + out->core.l_qname +
+        out->core.l_qseq + (out->core.l_qseq + 1)/2;
+    uint8_t *p = out->data + total;
+    uint8_t *q = p ;
+
+    while (p < out->data + out->data_len) {
+        int keep = 1 ;
+        switch(p[0]) {
+            case 'A':
+            case 'S': 
+            case 'C':
+            case 'N': keep = p[1] != 'M' ; break ;
+            case 'M': keep = p[1] != 'D' ; break ;
+            case 'X': keep = !strchr("01ACGMNOT", p[1]) ; break ;
+            case 'Y': keep = p[1] != 'Q' ; break ;
+        }
+
+        int len = 3 ;
+        int count ;
+        switch( p[2] & ~32 ) {
+            case 'C':
+            case 'A': len++; break;
+            case 'S': len+=2; break;
+            case 'I':
+            case 'F': len+=4; break;
+            case 'D': len+=8; break;
+            case 'Z':
+            case 'H': while( p[len] ) len++ ; len++; break;
+            case 'B': count=(int)p[4] << 0 | (int)p[5] << 8 | (int)p[6] << 16 | (int)p[7] << 24 ;
+                      len += 5;
+                      switch( p[3] & ~32 ) {
+                          case 'C':
+                          case 'A': len += count ; break;
+                          case 'S': len += 2*count; break;
+                          case 'I':
+                          case 'F': len += 4*count ; break;
+                          case 'D': len += 8*count ; break;
+                      }
+                      break;
+        }
+
+        if(keep) {
+            memmove(q, p, len);
+            q+=len;
+            total+=len;
+        }
+        p+=len;
+	}
+    out->data_len=total;
+}
+
+int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken)
+{
+    int i, r = read_bam_pair_core( bs, pair, allow_broken ) ;
+
+    if( pair->kind == singleton ) {
+        if( try_get_sai( bs->sai, 0, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) )
+            pair->phase = aligned ;
+    }
+    else if( pair->kind == proper_pair ) {
+        if( try_get_sai( bs->sai, 1, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) 
+                + try_get_sai( bs->sai, 2, &pair->bwa_seq[1].n_aln, &pair->bwa_seq[1].aln ) == 2 )
+            pair->phase = aligned ;
+    }
+
+    // make sure that either none or both pass QC
+    if( pair->kind == proper_pair ) {
+        pair->bam_rec[0].core.flag |= pair->bam_rec[1].core.flag & SAM_FQC ;
+        pair->bam_rec[1].core.flag |= pair->bam_rec[0].core.flag & SAM_FQC ;
+    }
+
+    for( i = 0 ; i != pair->kind ; ++i )
+        erase_unwanted_tags( &pair->bam_rec[i] ) ;
+    return r ;
+}

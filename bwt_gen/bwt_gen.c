@@ -822,7 +822,7 @@ static void BWTIncBuildRelativeRank(unsigned int* __restrict sortedRank, unsigne
 	unsigned int i, c;
 	unsigned int s, r;
 	unsigned int lastRank, lastIndex;
-	unsigned int oldInverseSa0RelativeRank = 0;
+	// unsigned int oldInverseSa0RelativeRank = 0;
 	unsigned int freq;
 
 	lastIndex = numItem;
@@ -833,7 +833,7 @@ static void BWTIncBuildRelativeRank(unsigned int* __restrict sortedRank, unsigne
 	s = seq[numItem];
 	relativeRank[s] = numItem;
 	if (lastRank == oldInverseSa0) {
-		oldInverseSa0RelativeRank = numItem;
+		// oldInverseSa0RelativeRank = numItem;
 		oldInverseSa0++;	// so that this segment of code is not run again
 		lastRank++;			// so that oldInverseSa0 become a sorted group with 1 item
 	}
@@ -868,7 +868,7 @@ static void BWTIncBuildRelativeRank(unsigned int* __restrict sortedRank, unsigne
 			lastRank = r;
 			relativeRank[s] = i;
 			if (r == oldInverseSa0) {
-				oldInverseSa0RelativeRank = i;
+				// oldInverseSa0RelativeRank = i;
 				oldInverseSa0++;	// so that this segment of code is not run again
 				lastRank++;			// so that oldInverseSa0 become a sorted group with 1 item
 			}
@@ -897,14 +897,14 @@ static void BWTIncBuildBwt(unsigned int*  seq, const unsigned int *relativeRank,
 static void BWTIncMergeBwt(const unsigned int *sortedRank, const unsigned int* oldBwt, const unsigned int *insertBwt,
 						   unsigned int* __restrict mergedBwt, const unsigned int numOldBwt, const unsigned int numInsertBwt)
 {
-	unsigned int bitsInWordMinusBitPerChar;
+	// unsigned int bitsInWordMinusBitPerChar;
 	unsigned int leftShift, rightShift;
 	unsigned int o;
 	unsigned int oIndex, iIndex, mIndex;
 	unsigned int mWord, mChar, oWord, oChar;
 	unsigned int numInsert;
 
-	bitsInWordMinusBitPerChar = BITS_IN_WORD - BIT_PER_CHAR;
+	// bitsInWordMinusBitPerChar = BITS_IN_WORD - BIT_PER_CHAR;
 
 	oIndex = 0;
 	iIndex = 0;
