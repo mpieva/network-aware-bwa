@@ -236,56 +236,85 @@ static bwa_cigar_t *refine_gapped_core(bwtint_t l_pac, const ubyte_t *pacseq, in
 	return cigar;
 }
 
+// To access pacseq: test against ambs and l_pac; else decode as below.
+// We need to find an initial position in ambs, afterwards we only need
+// to incrment, and then the ambs position can be updated easily.
+
+#define advance_pos() {                                     \
+    ++pos ;                                                 \
+    if( right < bns->ambs + bns->n_holes &&                 \
+            pos >= right->offset + right->len )             \
+        right++ ;                                           \
+} while(0)
+
+#define get_pac ( right < bns->ambs + bns->n_holes && pos >= right->offset        \
+                  ? right->amb : pacseq[(pos)>>2] >> ((~(pos)&3)<<1) & 3 )
+
 char *bwa_cal_md1(int n_cigar, bwa_cigar_t *cigar, int len, bwtint_t pos, ubyte_t *seq,
-				  bwtint_t l_pac, ubyte_t *pacseq, kstring_t *str, int *_nm)
+				  const bntseq_t *bns, ubyte_t *pacseq, kstring_t *str, int *_nm)
 {
-	bwtint_t x, y;
 	int z, u, c, nm = 0;
+    bntamb1_t *left = bns->ambs, *right = bns->ambs + bns->n_holes;
 	str->l = 0; // reset
-	x = pos; y = 0;
+	
+	// Find smallest block in ambs that ends after @pos@.  One
+    // past-the-end is valid but must not be accessed!  Correct interval
+    // ends up in @right@.
+	while (left < right) {
+		bntamb1_t *mid = left + ((right - left) >> 1);
+		if (pos >= mid->offset + mid->len) left = mid + 1;
+		else if (pos < mid->offset) right = mid;
+		else left = right = mid ;
+	}
+
 	if (cigar) {
-		int k, l;
+		int k, l, y = 0;
 		for (k = u = 0; k < n_cigar; ++k) {
 			l = __cigar_len(cigar[k]);
 			if (__cigar_op(cigar[k]) == FROM_M) {
-				for (z = 0; z < l && x+z < l_pac; ++z) {
-					c = pacseq[(x+z)>>2] >> ((~(x+z)&3)<<1) & 3;
-					if (c > 3 || seq[y+z] > 3 || c != seq[y+z]) {
+				for (z = 0; z < l && pos < bns->l_pac; ++z, ++y) {
+					c = get_pac ;
+					if (c > 3 || seq[y] > 3 || c != seq[y]) {
 						ksprintf(str, "%d", u);
-						kputc("ACGTN"[c], str);
+						kputc(c>3?c:"ACGT"[c], str);
 						++nm;
 						u = 0;
 					} else ++u;
+                    advance_pos() ;
 				}
-				x += l; y += l;
-/*		        } else if (cigar[k]>>14 == FROM_I || cigar[k]>>14 == 3) { */
-                        } else if (__cigar_op(cigar[k]) == FROM_I || __cigar_op(cigar[k]) == FROM_S) {
+            } else if (__cigar_op(cigar[k]) == FROM_I || __cigar_op(cigar[k]) == FROM_S) {
 				y += l;
 				if (__cigar_op(cigar[k]) == FROM_I) nm += l;
 			} else if (__cigar_op(cigar[k]) == FROM_D) {
 				ksprintf(str, "%d", u);
 				kputc('^', str);
-				for (z = 0; z < l && x+z < l_pac; ++z)
-					kputc("ACGT"[pacseq[(x+z)>>2] >> ((~(x+z)&3)<<1) & 3], str);
+				for (z = 0; z < l && pos < bns->l_pac; ++z) {
+					kputc(c>3?c:"ACGT"[get_pac], str);
+                    advance_pos() ;
+                }
 				u = 0;
-				x += l; nm += l;
+				nm += l;
 			}
 		}
 	} else { // no gaps
 		for (z = u = 0; z < (bwtint_t)len; ++z) {
-			c = pacseq[(x+z)>>2] >> ((~(x+z)&3)<<1) & 3;
-			if (c > 3 || seq[y+z] > 3 || c != seq[y+z]) {
+			c = get_pac ;
+			if (c > 3 || seq[z] > 3 || c != seq[z]) {
 				ksprintf(str, "%d", u);
-				kputc("ACGTN"[c], str);
+				kputc(c>3?c:"ACGT"[c], str);
 				++nm;
 				u = 0;
 			} else ++u;
+            advance_pos() ;
 		}
 	}
 	ksprintf(str, "%d", u);
 	*_nm = nm;
 	return strdup(str->s);
 }
+
+#undef advance_pos
+#undef get_pac
 
 void bwa_correct_trimmed(bwa_seq_t *s)
 {
@@ -378,7 +407,7 @@ void bwa_refine_gapped(const bntseq_t *bns, int n_seqs, bwa_seq_t *seqs, ubyte_t
 		if (s->type != BWA_TYPE_NO_MATCH) {
 			int nm;
 			s->md = bwa_cal_md1(s->n_cigar, s->cigar, s->len, s->pos, s->strand? s->rseq : s->seq,
-								bns->l_pac, ntbns? ntpac : pacseq, str, &nm);
+								bns, ntbns? ntpac : pacseq, str, &nm);
 			s->nm = nm;
 		}
 	}
@@ -455,7 +484,7 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 			if (mate->type != BWA_TYPE_NO_MATCH) {
                 int m_seqid, m_j;
                 // redundant calculation here, but should not matter too much
-                bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
+                nn += bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
 
                 m_j = pos_end(mate) - mate->pos; // m_j is the length of the reference in the alignment
                 if( mate->pos + m_j - bns->anns[m_seqid].offset > bns->anns[m_seqid].len ) {
@@ -551,6 +580,12 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 		if (bwa_rg_id) err_printf("\tRG:Z:%s", bwa_rg_id);
 		if (p->bc[0]) err_printf("\tBC:Z:%s", p->bc);
 		if (p->clip_len < p->full_len) err_printf("\tXC:i:%d", p->clip_len);
+		if (mate && mate->type != BWA_TYPE_NO_MATCH) {
+            int m_seqid, nn;
+            // reproduce XN field of the mate if it has any
+            nn = bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
+			if (nn) err_printf("\tXN:i:%d", nn);
+        }
 		putchar('\n');
 	}
 }

@@ -1,7 +1,7 @@
 #define CHUNKSIZE 0x100000
 
 static const int loudness = 0;
-static const int ring_size = 0x20000;
+static const int ring_size = 0x280000;
 static const int timeout = 30;
 
 
@@ -425,12 +425,11 @@ static void bam_resize_cigar( bam1_t *b, int n_cigar )
 
 void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, int mode, int max_top2)
 {
-	int j;
     if (p->clip_len < p->full_len) bam_push_int( out, 'X', 'C', p->clip_len );
     if (p->max_entries && debug_bam) bam_push_int( out, 'Y', 'Q', p->max_entries );
 
 	if (p->type != BWA_TYPE_NO_MATCH || (mate && mate->type != BWA_TYPE_NO_MATCH)) {
-		int seqid, nn, am = 0;
+		int seqid, am = 0, nn, j;
 		if (p->type == BWA_TYPE_NO_MATCH) {
 			p->pos = mate->pos;
 			p->strand = mate->strand;
@@ -476,7 +475,9 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 			int m_seqid, m_j;
 			am = mate->seQ < p->seQ? mate->seQ : p->seQ; // smaller single-end mapping quality
 			// redundant calculation here, but should not matter too much
-			bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
+            // also, add up the nn values so self and mate get the same
+            // XN field
+			nn += bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
 
             m_j = pos_end(mate) - mate->pos; // m_j is the length of the reference in the alignment
             if( mate->pos + m_j - bns->anns[m_seqid].offset > bns->anns[m_seqid].len ) {
@@ -541,7 +542,7 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 					bwt_multi1_t *q = p->multi + i;
 					int k;
 					j = pos_end_multi(q, p->len) - q->pos;
-					nn = bns_coor_pac2real(bns, q->pos, j, &seqid);
+					bns_coor_pac2real(bns, q->pos, j, &seqid);
                     mysnprintf("%s,%c%d,", bns->anns[seqid].name, q->strand? '-' : '+',
 						   (int)(q->pos - bns->anns[seqid].offset + 1));
 					if (q->cigar) {
@@ -577,6 +578,13 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 		if (mate && mate->type == BWA_TYPE_NO_MATCH) out->core.flag |= SAM_FMU;
 
         bam_resize_cigar( out, 0 ) ;
+
+        // if the mate has an XN tag, we need to reproduce it here
+		if (mate && mate->type != BWA_TYPE_NO_MATCH) {
+			int m_seqid, nn ;
+			nn = bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
+            if (nn) bam_push_int( out, 'X', 'N', nn ) ;
+        }
 	}
 }
 
