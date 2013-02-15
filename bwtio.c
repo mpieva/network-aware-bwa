@@ -72,7 +72,7 @@ void bwt_restore_sa(const char *fn, bwt_t *bwt, int touch)
     xassert(fd>=0, "failed to open sa file");
     off_t len = lseek(fd, 0, SEEK_END);
     xassert(len>=0, "failed to seek in sa file");
-    bwtint_t *raw = mmap_t( touch, 0, len, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
+    bwtint_t *raw = mmap_t( touch, 0, len, PROT_READ, MAP_PRIVATE, fd, 0);
     xassert(raw != (void*)-1, "failed to mmap sa file");
     madvise(raw, len, MADV_WILLNEED);
 
@@ -82,7 +82,7 @@ void bwt_restore_sa(const char *fn, bwt_t *bwt, int touch)
 	bwt->n_sa = (bwt->seq_len + bwt->sa_intv) / bwt->sa_intv;
 	bwt->sa = raw+6 ;
     bwt->mmap_sa = 1;
-	bwt->sa[0] = -1;
+	/* bwt->sa[0] = -1; */
 	close(fd);
     xassert((bwt->n_sa+6) * sizeof(bwtint_t)==len, "SA-BWT inconsistency: length does not match.");
 }
@@ -173,7 +173,7 @@ void bwt_restore_sa(const char *fn, bwt_t *bwt)
 
 	bwt->n_sa = (bwt->seq_len + bwt->sa_intv) / bwt->sa_intv;
 	bwt->sa = (bwtint_t*)calloc(bwt->n_sa, sizeof(bwtint_t));
-	bwt->sa[0] = -1;
+	/* bwt->sa[0] = -1; */
 
 	err_fread(bwt->sa + 1, sizeof(bwtint_t), bwt->n_sa - 1, fp);
 	fclose(fp);
