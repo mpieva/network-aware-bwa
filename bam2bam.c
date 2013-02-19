@@ -11,6 +11,9 @@ static const int timeout = 30;
  * options, maybe even some more.
  */
 
+// XXX get this from bwt, even if the master doesn't load the whole bwt!
+#define LLL 3000000000
+
 #include "bamlite.h"
 #include "bwtaln.h"
 #include "bwase.h"
@@ -31,6 +34,7 @@ static const int timeout = 30;
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <zlib.h>
 
 static const int the_hwm = 64;
 static const int the_linger = 2000;
@@ -60,6 +64,7 @@ struct option longopts[] = {
     { "only-aligned",           0, 0, 128 },
     { "debug-bam",              0, 0, 129 },
     { "broken-input",           0, 0, 130 },
+    { "temp-dir",               1, 0, 131 },
     { "max-insert-size",        1, 0, 'a' },
     { "max-occurences",         1, 0, 'C' },
     { "max-occurences-se",      1, 0, 'D' },
@@ -100,8 +105,7 @@ static void      *zmq_context = 0;
 static int       listen_port  = 0;
 
 static bwa_seqio_t *ks;
-static khint_t iter;
-static isize_info_t ii;
+static isize_info_t null_ii = {0} ;
 
 static uint8_t revcom1[256] ;
 static void init_revcom1()
@@ -675,30 +679,15 @@ static void posn_pair( bam_pair_t *raw )
     }
 }
 
-    // XXX inferring isize is thoroughly broken!
-    // Needs:  mapQ, pos, len, 
-    // infer_isize(n_seqs, seqs, &ii, pe_opt->ap_prior, bwt[0]->seq_len);
-    //
-    // if it went wrong this time but went right the last time, use the
-    // last estimate
-    // if (ii.avg < 0.0 && last_ii.avg > 0.0) ii = last_ii;                         
-    //
-    // and if it was given on the command line,override the estimate
-    // (with invalid values?!)
-    // if (pe_opt->force_isize) {
-    // fprintf(stderr, "[%s] discard insert size estimate as user's request.\n", __func__);
-    // ii.low = ii.high = 0; ii.avg = ii.std = -1.0;
-    // }
-
-
-// PE part of alignment.  Needs insert size estimate for pairing and
-// mate pair rescue.
-static void finish_pair( bam_pair_t *raw )
+static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t n_tot[2], uint64_t n_mapped[2] )
 {
     if( raw->phase == positioned ) {
         bwa_seq_t *p[2] = { raw->bwa_seq, raw->bwa_seq+1 } ;
         pe_data_t d; // Is this copy even needed?!
         int j;
+
+        khiter_t it = kh_get(isize_infos, iinfos, bam_get_rg(raw->bam_rec)) ;
+        isize_info_t *ii = it == kh_end(iinfos) ? &null_ii : &kh_val(iinfos,it) ;
 
         memset(&d, 0, sizeof(pe_data_t));
         for (j = 0; j < 2; ++j) 
@@ -752,8 +741,7 @@ static void finish_pair( bam_pair_t *raw )
                         }
                     }
                 }
-                /* cnt_chg += */
-                pairing(p, &d, pe_opt, gap_opt->s_mm, &ii);
+                pairing(p, &d, pe_opt, gap_opt->s_mm, ii);
             }
         }
 
@@ -777,7 +765,7 @@ static void finish_pair( bam_pair_t *raw )
             }
         }
 
-        { // consistency check (copy is not needed if this doesn't fail!)
+        { // XXX consistency check (copy into d is not needed if this doesn't fail!)
             for (j = 0; j < 2; ++j) 
             {
                 if( d.aln[j].n != p[j]->n_aln ||
@@ -786,23 +774,21 @@ static void finish_pair( bam_pair_t *raw )
             }
         }
 
-
         kv_destroy(d.arr);
         kv_destroy(d.pos[0]); kv_destroy(d.pos[1]);
         kv_destroy(d.aln[0]); kv_destroy(d.aln[1]);
 
         // END from bwa_cal_pac_pos_pe
-        bwa_paired_sw(bns, pac, 1, p, pe_opt, &ii);
-        // last_ii = ii;
+        bwa_paired_sw1(bns, pac, p, pe_opt, ii, n_tot, n_mapped);
 
         // END from bwa_sai2sam_pe_core
         bwa_refine_gapped(bns, 1, p[0], pac, ntbns);
         bwa_refine_gapped(bns, 1, p[1], pac, ntbns);
 
-        // For PE reads, BWA would have concatenated their barcodes.  We
-        // don't, for once because we don't identify barcodes, but also
-        // because the idea feels wrong.
-        bwa_update_bam1( &raw->bam_rec[0],  bns, &raw->bwa_seq[0], &raw->bwa_seq[1], gap_opt->mode, gap_opt->max_top2);
+        // For PE reads, stock BWA would have concatenated their
+        // barcodes.  We don't, for once because we don't identify
+        // barcodes, but also because the idea feels wrong.
+        bwa_update_bam1( &raw->bam_rec[0], bns, &raw->bwa_seq[0], &raw->bwa_seq[1], gap_opt->mode, gap_opt->max_top2);
         bwa_update_bam1( &raw->bam_rec[1], bns, &raw->bwa_seq[1], &raw->bwa_seq[0], gap_opt->mode, gap_opt->max_top2);
         bwa_free_read_seq1(&raw->bwa_seq[1]);
         bwa_free_read_seq1(&raw->bwa_seq[0]);
@@ -858,14 +844,12 @@ void pair_posn(bam_pair_t *p)
     }
 }
 
-// isize something or other come between those two
-
-void pair_finish(bam_pair_t *p)
+void pair_finish(bam_pair_t *p, khash_t(isize_infos) *iinfos, uint64_t n_tot[2], uint64_t n_mapped[2] )
 {
     switch (p->kind) {
         case eof_marker: break ;
         case singleton:   finish_singleton(p) ; break ;
-        case proper_pair: finish_pair(p) ; break ;
+        case proper_pair: finish_pair(p,iinfos,n_tot,n_mapped) ; break ;
     }
 }
 
@@ -884,9 +868,162 @@ void pair_print_bam(BGZF *output, bam_pair_t *p)
         bwa_print_bam1(output, &p->bam_rec[i]);
 }
 
-void improve_isize_est(bam_pair_t *p)
+inline void put_int( unsigned char **p, int x )
 {
+    (*p)[0] = x >>  0 & 0xff ;
+    (*p)[1] = x >>  8 & 0xff ;
+    (*p)[2] = x >> 16 & 0xff ;
+    (*p)[3] = x >> 24 & 0xff ;
+    *p += 4 ;
+}
 
+inline void put_block( unsigned char **p, void *q, size_t s )
+{
+    memcpy( *p, q, s ) ;
+    *p += s ;
+}
+
+/** 
+ * Serializes a bam_pair_t, no matter what phase it is in.
+ * We only serialize the valid fields, depending on phase.
+ */
+void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
+{
+    // recno, kind, phase, 0-2 bam_recs w/ data_len
+    int rc, i, len = 4 + 1 + 1 ;
+    for( i = 0 ; i != p->kind ; ++i ) {
+        len += sizeof( bam1_core_t ) + 4 + p->bam_rec[i].data_len ;
+        switch( p->phase ) {
+            case pristine: break ;
+            case finished: break ;
+            case positioned: len += 29 + p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ;
+                             // fallthrough!
+            case aligned: len += 8 + p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ;
+                          break ;
+        }
+    }
+
+    rc = zmq_msg_init_size(m, len) ;
+    xassert (rc == 0, "fail to init message");
+
+    unsigned char *q = zmq_msg_data(m);
+    put_int( &q, p->recno ) ;
+    *q++ = p->kind ;
+    *q++ = p->phase ;
+
+    for( i = 0 ; i != p->kind ; ++i ) {
+        put_block( &q, &p->bam_rec[i].core, sizeof( bam1_core_t ) ) ;
+        put_int(   &q,  p->bam_rec[i].data_len ) ;
+        put_block( &q,  p->bam_rec[i].data, p->bam_rec[i].data_len ) ;
+
+        switch( p->phase ) {
+            case pristine:   break ;
+            case finished:   break ;
+            case positioned: *q++ = p->bwa_seq[i].strand << 4 | p->bwa_seq[i].type ;
+                             *q++ = p->bwa_seq[i].n_mm ;
+                             *q++ = p->bwa_seq[i].n_gapo ;
+                             *q++ = p->bwa_seq[i].n_gape ;
+                             *q++ = p->bwa_seq[i].seQ ;
+                             put_int( &q, p->bwa_seq[i].score ) ;
+                             put_int( &q, p->bwa_seq[i].sa ) ;
+                             put_int( &q, p->bwa_seq[i].c1 ) ;
+                             put_int( &q, p->bwa_seq[i].c2 ) ;
+                             put_int( &q, p->bwa_seq[i].pos ) ;
+                             put_int( &q, p->bwa_seq[i].n_multi ) ;
+                             put_block( &q, p->bwa_seq[i].multi, p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ) ;
+                             // fallthrough!
+            case aligned:    put_int(   &q, p->bwa_seq[i].max_entries ) ;
+                             put_int(   &q, p->bwa_seq[i].n_aln ) ;
+                             put_block( &q, p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             break ;
+        }
+    }
+    xassert( q == zmq_msg_data(m) + len, "logic error in msg_init_from_pair" ) ;
+}
+
+inline int get_int( unsigned char **p )
+{
+    *p += 4 ;
+    return (int)(*p)[-1] << 24 |
+           (int)(*p)[-2] << 16 |
+           (int)(*p)[-3] <<  8 |
+           (int)(*p)[-4] <<  0 ;
+}
+
+inline void get_block( unsigned char **p, void *q, size_t s )
+{
+    memcpy( q, *p, s ) ;
+    *p += s ;
+}
+
+
+void pair_init_from_msg(bam_pair_t *p, zmq_msg_t *m)
+{
+    int i ;
+    unsigned char *q = zmq_msg_data(m);
+
+    memset( p, 0, sizeof( bam_pair_t ) ) ;
+    p->recno = get_int( &q ) ;
+    p->kind  = *q++ ;
+    p->phase = *q++ ;
+
+    for( i = 0 ; i != p->kind ; ++i ) {
+        get_block( &q, &p->bam_rec[i].core, sizeof( bam1_core_t ) ) ;
+        p->bam_rec[i].data_len = p->bam_rec[i].m_data = get_int( &q ) ;
+        p->bam_rec[i].data = malloc( p->bam_rec[i].data_len ) ;
+        get_block( &q,  p->bam_rec[i].data, p->bam_rec[i].data_len ) ;
+
+        switch( p->phase ) {
+            case pristine:   break ;
+            case finished:   break ;
+            case positioned: p->bwa_seq[i].strand = *q >> 4 ;
+                             p->bwa_seq[i].type   = *q++ & 0xff ;
+                             p->bwa_seq[i].n_mm   = *q++ ;
+                             p->bwa_seq[i].n_gapo = *q++ ;
+                             p->bwa_seq[i].n_gape = *q++ ;
+                             p->bwa_seq[i].seQ    = p->bwa_seq[i].mapQ = *q++ ;
+                             p->bwa_seq[i].score  = get_int( &q ) ;
+                             p->bwa_seq[i].sa     = get_int( &q ) ;
+                             p->bwa_seq[i].c1     = get_int( &q ) ;
+                             p->bwa_seq[i].c2     = get_int( &q ) ;
+                             p->bwa_seq[i].pos    = get_int( &q ) ;
+                             p->bwa_seq[i].n_multi= get_int( &q ) ;
+                             p->bwa_seq[i].multi  = malloc( p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ) ;
+                             get_block( &q, p->bwa_seq[i].multi, p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ) ;
+                             // fallthrough!
+            case aligned:    p->bwa_seq[i].max_entries = get_int( &q ) ;
+                             p->bwa_seq[i].n_aln       = get_int( &q ) ;
+                             p->bwa_seq[i].aln         = malloc( p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             get_block( &q,  p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
+                             break ;
+        }
+    }
+    xassert( q == (unsigned char*)zmq_msg_data(m) + zmq_msg_size(m), "error decoding message" ) ;
+}
+
+void pair_print_custom( gzFile f, bam_pair_t *p )
+{
+    zmq_msg_t m ;
+    msg_init_from_pair( &m, p ) ;
+    uint32_t len = zmq_msg_size( &m ) ;
+    gzwrite( f, &len, sizeof(len) ) ;
+    gzwrite( f, zmq_msg_data( &m ), len ) ;
+    zmq_msg_close(&m) ;
+}
+
+int read_pair_custom( gzFile f, bam_pair_t *p )
+{
+    uint32_t len ;
+    if( sizeof(len) == gzread( f, &len, sizeof(len) ) ) 
+    {
+        zmq_msg_t m ;
+        zmq_msg_init_size( &m, len ) ;
+        gzread( f, zmq_msg_data(&m), len ) ;
+        pair_init_from_msg(p, &m);
+        zmq_msg_close(&m);
+        return p->kind;
+    }
+    else return 0;
 }
 
 // This is the simple sequential loop:  We run it if exactly one thread
@@ -894,8 +1031,7 @@ void improve_isize_est(bam_pair_t *p)
 // to "classic" BWA, we stop that blockwise nonsense and get exactly one
 // singleton or pair per iteration.
 //
-// XXX Needs to be split into two loops.
-void sequential_loop( BGZF* output )
+void sequential_loop_pass1( gzFile* temporary, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
     gettimeofday( &tv0, 0 ) ;
@@ -905,8 +1041,8 @@ void sequential_loop( BGZF* output )
     for(;;) {
         rc=read_bam_pair(ks, &raw, broken_input);
         if(rc<0) {
-            fprintf( stderr, "[sequential_loop] error reading input BAM %s\n",
-                    rc==-2 ? "(lone mate)" : "" ) ;
+            fprintf(stderr, "[%s] error reading input BAM%s\n",
+                    __FUNCTION__, rc==-2 ? " (lone mate)" : "" ) ;
             exit(1);
         }
         if(rc==0) break ;
@@ -914,20 +1050,55 @@ void sequential_loop( BGZF* output )
         tot_seqs += raw.kind ;
         if(tot_seqs%0x20000 < raw.kind) {
             gettimeofday( &tv1, 0 ) ;
-            fprintf(stderr, "[sequential_loop] %d sequences processed in %.2f sec\n",
-                    tot_seqs, tdiff( &tv0, &tv1 ));
+            fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
+                    __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
         pair_aln(&raw);
         pair_posn(&raw);
-        improve_isize_est(&raw);
-        pair_finish(&raw);
+        improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
+        pair_print_custom(temporary,&raw);
+        bam_destroy_pair(&raw);
+    }
+    gettimeofday( &tv1, 0 ) ;
+    fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
+            __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
+    fprintf(stderr, "[%s] finished cleanly.\n", __FUNCTION__);
+}
+
+void sequential_loop_pass2( BGZF* temporary, BGZF* output, khash_t(isize_infos) *iinfos )
+{
+    uint64_t n_tot[2]={0,0}, n_mapped[2]={0,0};
+    struct timeval tv0, tv1 ;
+    gettimeofday( &tv0, 0 ) ;
+
+    int tot_seqs = 0, rc=0 ;
+    bam_pair_t raw ;
+    for(;;) {
+        rc=read_pair_custom(temporary, &raw);
+        if(rc<0) {
+            fprintf(stderr, "[%s] error reading intermediate file\n", __FUNCTION__);
+            exit(1);
+        }
+        if(rc==0) break ;
+
+        tot_seqs += raw.kind ;
+        if(tot_seqs%0x100000 < raw.kind) {
+            gettimeofday( &tv1, 0 ) ;
+            fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
+                    __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
+        }
+        pair_finish(&raw, iinfos, n_tot, n_mapped);
         pair_print_bam(output,&raw);
         bam_destroy_pair(&raw);
     }
     gettimeofday( &tv1, 0 ) ;
-    fprintf(stderr, "[sequential_loop] %d sequences processed in %.2f sec\n",
-            tot_seqs, tdiff( &tv0, &tv1 ));
-    fprintf(stderr, "[sequential_loop] finished cleanly, shutting down\n");
+    fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n"
+                    "[%s] finished cleanly, shutting down.\n"
+	                "[bwa_paired_sw] %lld out of %lld Q%d singletons are mated.\n"
+	                "[bwa_paired_sw] %lld out of %lld Q%d discordant pairs are fixed.\n",
+                    __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ), __FUNCTION__,
+                    (long long)n_mapped[1], (long long)n_tot[1], SW_MIN_MAPQ,
+                    (long long)n_mapped[0], (long long)n_tot[0], SW_MIN_MAPQ );
 }
 
 void set_sockopts( void *socket )
@@ -979,134 +1150,7 @@ void *run_config_service( void *arg )
     return 0;
 }
 
-inline void put_int( unsigned char **p, int x )
-{
-    (*p)[0] = x >>  0 & 0xff ;
-    (*p)[1] = x >>  8 & 0xff ;
-    (*p)[2] = x >> 16 & 0xff ;
-    (*p)[3] = x >> 24 & 0xff ;
-    *p += 4 ;
-}
-
-inline void put_block( unsigned char **p, void *q, size_t s )
-{
-    memcpy( *p, q, s ) ;
-    *p += s ;
-}
-
-
-/** 
- * Serializes a bam_pair_t, no matter what phase it is in.
- * We only serialize the valid fields, depending on phase.
- */
-void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
-{
-    // recno, kind, phase, 0-2 bam_recs w/ data_len
-    int rc, i, len = 4 + 1 + 1 ;
-    for( i = 0 ; i != p->kind ; ++i ) {
-        len += sizeof( bam1_core_t ) + 4 + p->bam_rec[i].data_len ;
-        switch( p->phase ) {
-            case pristine: break ;
-            case finished: break ;
-            case positioned: len += 25 ;
-                             // fallthrough!
-            case aligned: len += 8 + p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ;
-                          break ;
-        }
-    }
-
-    rc = zmq_msg_init_size(m, len) ;
-    xassert (rc == 0, "fail to init message");
-
-    unsigned char *q = zmq_msg_data(m);
-    put_int( &q, p->recno ) ;
-    *q++ = p->kind ;
-    *q++ = p->phase ;
-
-    for( i = 0 ; i != p->kind ; ++i ) {
-        put_block( &q, &p->bam_rec[i].core, sizeof( bam1_core_t ) ) ;
-        put_int(   &q,  p->bam_rec[i].data_len ) ;
-        put_block( &q,  p->bam_rec[i].data, p->bam_rec[i].data_len ) ;
-
-        switch( p->phase ) {
-            case pristine:   break ;
-            case finished:   break ;
-            case positioned: *q++ = p->bwa_seq[i].strand << 4 | p->bwa_seq[i].type ;
-                             *q++ = p->bwa_seq[i].n_mm ;
-                             *q++ = p->bwa_seq[i].n_gapo ;
-                             *q++ = p->bwa_seq[i].n_gape ;
-                             *q++ = p->bwa_seq[i].seQ ;
-                             put_int( &q, p->bwa_seq[i].score ) ;
-                             put_int( &q, p->bwa_seq[i].sa ) ;
-                             put_int( &q, p->bwa_seq[i].c1 ) ;
-                             put_int( &q, p->bwa_seq[i].c2 ) ;
-                             put_int( &q, p->bwa_seq[i].pos ) ;
-                             // fallthrough!
-            case aligned:    put_int(   &q, p->bwa_seq[i].max_entries ) ;
-                             put_int(   &q, p->bwa_seq[i].n_aln ) ;
-                             put_block( &q, p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
-                             break ;
-        }
-    }
-    xassert( q == zmq_msg_data(m) + len, "logic error in msg_init_from_pair" ) ;
-}
-
-inline int get_int( unsigned char **p )
-{
-    *p += 4 ;
-    return (int)(*p)[-1] << 24 |
-           (int)(*p)[-2] << 16 |
-           (int)(*p)[-3] <<  8 |
-           (int)(*p)[-4] <<  0 ;
-}
-
-inline void get_block( unsigned char **p, void *q, size_t s )
-{
-    memcpy( q, *p, s ) ;
-    *p += s ;
-}
-
-
-void pair_init_from_msg(bam_pair_t *p, zmq_msg_t *m)
-{
-    int i ;
-    unsigned char *q = zmq_msg_data(m);
-
-    memset( p, 0, sizeof( bam_pair_t ) ) ;
-    p->recno = get_int( &q ) ;
-    p->kind  = *q++ ;
-    p->phase = *q++ ;
-
-    for( i = 0 ; i != p->kind ; ++i ) {
-        get_block( &q, &p->bam_rec[i].core, sizeof( bam1_core_t ) ) ;
-        p->bam_rec[i].data_len = p->bam_rec[i].m_data = get_int( &q ) ;
-        p->bam_rec[i].data = malloc( p->bam_rec[i].data_len ) ;
-        get_block( &q,  p->bam_rec[i].data, p->bam_rec[i].data_len ) ;
-
-        switch( p->phase ) {
-            case pristine:   break ;
-            case finished:   break ;
-            case positioned: p->bwa_seq[i].strand = *q >> 4 ;
-                             p->bwa_seq[i].type   = *q++ & 0xff ;
-                             p->bwa_seq[i].n_mm   = *q++ ;
-                             p->bwa_seq[i].n_gapo = *q++ ;
-                             p->bwa_seq[i].n_gape = *q++ ;
-                             p->bwa_seq[i].seQ    = *q++ ;
-                             p->bwa_seq[i].score  = get_int( &q ) ;
-                             p->bwa_seq[i].sa     = get_int( &q ) ;
-                             p->bwa_seq[i].c1     = get_int( &q ) ;
-                             p->bwa_seq[i].c2     = get_int( &q ) ;
-                             p->bwa_seq[i].pos    = get_int( &q ) ;
-                             // fallthrough!
-            case aligned:    p->bwa_seq[i].max_entries = get_int( &q ) ;
-                             p->bwa_seq[i].n_aln       = get_int( &q ) ;
-                             p->bwa_seq[i].aln         = malloc( p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
-                             get_block( &q,  p->bwa_seq[i].aln, p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ) ;
-                             break ;
-        }
-    }
-    xassert( q == (unsigned char*)zmq_msg_data(m) + zmq_msg_size(m), "error decoding message" ) ;
-}
+    
 
 void *run_reader_thread( void* socket )
 {
@@ -1144,7 +1188,7 @@ void *run_reader_thread( void* socket )
     return 0;
 }
  
-void *run_output_thread( BGZF *output, void* socket )
+void *run_output_thread( gzFile output, void* socket, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
     int lastrn = 0 ;
@@ -1173,7 +1217,8 @@ void *run_output_thread( BGZF *output, void* socket )
                 memmove( &tv0, &tv1, sizeof(struct timeval) ) ;
             }
         }
-        pair_print_bam(output, &pair);
+        improve_isize_est(iinfos, &pair, pe_opt->ap_prior, LLL);
+        pair_print_custom(output,&pair);
         bam_destroy_pair(&pair);
     }
     fprintf(stderr, "[run_output_thread] finished cleanly, shutting down\n");
@@ -1215,10 +1260,16 @@ void *run_worker_thread( void *arg )
         }
         pair_init_from_msg(&pair, &msg);
         zmq_msg_close(&msg);
-        pair_aln(&pair);
-        pair_posn(&pair);
-        improve_isize_est(&pair);
-        pair_finish(&pair);
+
+        switch( pair.phase ) {
+            case pristine: pair_aln(&pair);     // first two steps can run together
+            case aligned:  pair_posn(&pair);
+                           break ;              // but then we must send the result back
+            case positioned: fprintf( stderr, "[%s] not implemented!\n", __FUNCTION__ ) ; 
+                             exit(1) ;  // until we receive it again, then we finish it (once we know how to do that)
+            case finished: break ;              // boring...
+        }
+
         msg_init_from_pair(&msg,&pair);
         bam_destroy_pair(&pair);
         rc = zmq_msg_send(&msg, outgoing, 0);
@@ -1494,26 +1545,34 @@ break2:
 //   threads, also bind to listening port.
 // - Worker mode: connect, run worker threads and two streamer devices.
 
-void bwa_bam2bam_core( const char *prefix, BGZF *output )
+void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
 {
-	// cnt_chg=0;
-	// isize_info_t last_ii = {0} ;
+    khint_t iter;
+    char *tmpname = alloca( strlen(tmpdir) + 11 ) ;
+    strcpy( tmpname, tmpdir ) ;
+    strcat( tmpname, "/bwaXXXXXX" ) ;
 
     // Initialize genome index.  Needed if and only if we're going to
     // have a worker thread.
     if( gap_opt->n_threads ) init_genome_index( prefix,1 ) ;
 
 	g_hash = kh_init(64);
-	// last_ii.avg = -1.0;
-    ii.low = ii.high = 0; ii.avg = ii.std = -1.0;
+    khash_t(isize_infos) *iinfos = kh_init( isize_infos ) ;
     srand48(bns->seed);
 
     // Can we get away with a simple loop?
     if( !gap_opt->n_threads && !listen_port ) {
         fprintf( stderr, "[bwa_bam2bam_core] No threads and no listening port specified, nothing to do.\n" ) ;
         exit(1);
-    } else if( gap_opt->n_threads == 1 && !listen_port ) {
-        sequential_loop( output ) ;
+    } 
+    
+    int tmpfd1 = mkstemp( tmpname ) ;
+    int tmpfd2 = dup(tmpfd1) ;
+
+    gzFile tmpout = gzdopen( tmpfd1, "wb2" ) ;
+    
+    if( gap_opt->n_threads == 1 && !listen_port ) {
+        sequential_loop_pass1( tmpout, iinfos ) ;
     } else {
         void *workio[2] ;
         int n;
@@ -1583,7 +1642,7 @@ void bwa_bam2bam_core( const char *prefix, BGZF *output )
         pthread_detach( mux_tid ) ;
 
         // ...and shift to output in the foreground.
-        run_output_thread( output, bam_out );
+        run_output_thread( tmpout, bam_out, iinfos );
 
         // when we get here, we got the last record and an EOF marker,
         // so we can safely tear down everything
@@ -1598,6 +1657,17 @@ void bwa_bam2bam_core( const char *prefix, BGZF *output )
         zmq_xclose( broadcast ) ;
         zmq_term( zmq_context ) ;
     }
+
+    // XXX this only works if we loaded the index.  If called with "-t0"
+    // and a port number, we will blow up here.  Needs to be fixed soon.
+    gzclose( tmpout ) ;
+    infer_all_isizes( iinfos, pe_opt->ap_prior, LLL ) ;
+    lseek(tmpfd2, 0, SEEK_SET);
+    gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
+    sequential_loop_pass2( tmpin, output, iinfos ) ;
+    gzclose( tmpin ) ;
+    unlink( tmpname ) ;
+
 	if (pac) bwt_destroy_pac(pac,bns);
 	if (ntbns) bns_destroy(ntbns);
 	if (bns) bns_destroy(bns);
@@ -1607,6 +1677,15 @@ void bwa_bam2bam_core( const char *prefix, BGZF *output )
 	for (iter = kh_begin(g_hash); iter != kh_end(g_hash); ++iter)
 		if (kh_exist(g_hash, iter))
             free(kh_val(g_hash, iter).a);
+
+	for (iter = kh_begin(iinfos); iter != kh_end(iinfos); ++iter)
+    {
+        if (kh_exist(iinfos, iter)) {
+            free((char*)kh_key(iinfos, iter));
+            free(kh_val(iinfos, iter).hist);
+        }
+    }
+    kh_destroy(isize_infos, iinfos);
 	kh_destroy(64, g_hash);
 }
 
@@ -1615,6 +1694,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
 	int c, opte = -1;
     char *saif[3] = {0,0,0} ;
     char *ofile = 0;
+    char *tmpname = "/var/tmp" ;
 
 	gap_opt = gap_init_opt();
 	pe_opt = bwa_init_pe_opt();
@@ -1657,6 +1737,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
         case 128: only_aligned = 1; break;
         case 129: debug_bam = 1; break;
         case 130: broken_input = 1; break;
+        case 131: tmpname = *optarg ? optarg : "." ; break ;
 		default: return 1;
 		}
 	}
@@ -1728,7 +1809,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
     }
     bam_header_destroy(hdr);
 
-    bwa_bam2bam_core(prefix, output);
+    bwa_bam2bam_core(prefix, tmpname, output);
 	bwa_seq_close(ks);
 
     bgzf_close( output );
@@ -1748,6 +1829,7 @@ void *run_device( void *args )
 
 void bwa_worker_core( int nthreads, char* host, int port ) 
 {
+    khiter_t iter ;
     time_t start_time = time(0) ;
     s_catch_signals();
 	// int tot_seqs=0; // cnt_chg=0;
@@ -1763,8 +1845,7 @@ void bwa_worker_core( int nthreads, char* host, int port )
     init_genome_index( prefix,1 ) ;
 
 	g_hash = kh_init(64);
-	// last_ii.avg = -1.0;
-    ii.low = ii.high = 0; ii.avg = ii.std = -1.0;
+    // XXX ii.low = ii.high = 0; ii.avg = ii.std = -1.0;
 
     srand48(bns->seed);
 

@@ -63,18 +63,24 @@ static double ierfc(double x) // inverse erfc(); iphi(x) = M_SQRT2 *ierfc(2 * x)
 }
 */
 
-// for normal distribution, this is about 3std
-#define OUTLIER_BOUND 2.0
-
-/* Interesting... this function looks at seq->pos, but not at
- * seq->strand?!  Should it not?
+/* Input is an unknown number of aligned pairs.  mapQ is used for
+ * filtering (both must be >= 20),  pos and len are then used to compute
+ * an insert size, which must be < 100000 to be considered at all.  This
+ * happens in BWT coordinates, so there is no strand information to
+ * consider.  Also not considered is the actual target sequence that was
+ * hit.
  */
+
 static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double ap_prior, int64_t L)
 {
 	uint64_t x, *isizes, n_ap = 0;
+    // max len becomes maximum read length -- not ISIZE!
+    // p25, p50, p75 becomes quartiles of ISIZE distribution
 	int n, i, tot, p25, p75, p50, max_len = 1, tmp;
 	double skewness = 0.0, kurtosis = 0.0, y;
 
+    // avg becomes average of stuff between low and high.  (is this
+    // still unbiased?  i think so.)
 	ii->avg = ii->std = -1.0;
 	ii->low = ii->high = ii->high_bayesian = 0;
 	isizes = (uint64_t*)calloc(n_seqs, 8);
@@ -100,10 +106,8 @@ static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double 
 	tmp  = (int)(p25 - OUTLIER_BOUND * (p75 - p25) + .499);
 
 	ii->low = tmp > max_len? tmp : max_len; // ii->low is unsigned
-    // XXX This is not meaningful... tmp should not be capable of
-    // underflowing, (p75-p25) is guaranteed to be >=0, too.  If this
-    // was supposed to test for underflow and correct for it, shouldn't it be
-	// ii->low = tmp >= 0 ? tmp : 0;  // ?
+    // Okay, this can undeflow.  We set the lower bound to the maximum
+    // read length.  A bit weird, but I can see how it might work.
     // (Also, comment is misleading.)
 
 	ii->high = (int)(p75 + OUTLIER_BOUND * (p75 - p25) + .499);
@@ -141,13 +145,23 @@ static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double 
     // - Kurtosis is also biased and could use a (rather complicated)
     //   correction.
 
+    // Chose high_bayesian such that P( ISIZE > high_bayesian ) ==
+    // ap_prior, assuming a normal distribution.
 	for (y = 1.0; y < 10.0; y += 0.01)
 		if (.5 * erfc(y / M_SQRT2) < ap_prior / L * (y * ii->std + ii->avg)) break;
 	ii->high_bayesian = (bwtint_t)(y * ii->std + ii->avg + .499);
+    
 	for (i = 0; i < tot; ++i)
-		if (isizes[i] > ii->high_bayesian) ++n_ap;
+		if (isizes[i] > ii->high_bayesian)
+            ++n_ap;  // count how many are too high
+
+    // estimate rate of abnormal pairs, use the estimate iff it is
+    // higher than the prior.  (Is this expressed in percent?  And we
+    // add a hundredth of a percent to get the rounding right or
+    // something?)
 	ii->ap_prior = .01 * (n_ap + .01) / tot;
 	if (ii->ap_prior < ap_prior) ii->ap_prior = ap_prior;
+
 	free(isizes);
 	fprintf(stderr, "[infer_isize] (25, 50, 75) percentile: (%d, %d, %d)\n", p25, p50, p75);
 	if (isnan(ii->std) || p75 > 100000) {
@@ -155,9 +169,7 @@ static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double 
 		fprintf(stderr, "[infer_isize] fail to infer insert size: weird pairing\n");
 		return -1;
 	}
-	for (y = 1.0; y < 10.0; y += 0.01)
-		if (.5 * erfc(y / M_SQRT2) < ap_prior / L * (y * ii->std + ii->avg)) break;
-	ii->high_bayesian = (bwtint_t)(y * ii->std + ii->avg + .499);
+
 	fprintf(stderr, "[infer_isize] low and high boundaries: %d and %d for estimating avg and std\n", ii->low, ii->high);
 	fprintf(stderr, "[infer_isize] inferred external isize from %d pairs: %.3lf +/- %.3lf\n", n, ii->avg, ii->std);
 	fprintf(stderr, "[infer_isize] skewness: %.3lf; kurtosis: %.3lf; ap_prior: %.2e\n", skewness, kurtosis, ii->ap_prior);
@@ -417,9 +429,6 @@ int bwa_cal_pac_pos_pe(const char *prefix, bwt_t *const _bwt[2], int n_seqs, bwa
 	return cnt_chg;
 }
 
-#define SW_MIN_MATCH_LEN 20
-#define SW_MIN_MAPQ 17
-
 // cnt = n_mm<<16 | n_gapo<<8 | n_gape
 bwa_cigar_t *bwa_sw_core(bwtint_t l_pac, const ubyte_t *pacseq, int len, const ubyte_t *seq, int64_t *beg, int reglen,
 					  int *n_cigar, uint32_t *_cnt)
@@ -507,22 +516,8 @@ bwa_cigar_t *bwa_sw_core(bwtint_t l_pac, const ubyte_t *pacseq, int len, const u
 	return cigar;
 }
 
-ubyte_t *bwa_paired_sw(const bntseq_t *bns, const ubyte_t *_pacseq, int n_seqs, bwa_seq_t *seqs[2], const pe_opt_t *popt, const isize_info_t *ii)
+void bwa_paired_sw1(const bntseq_t *bns, const ubyte_t *pacseq, bwa_seq_t *p[2], const pe_opt_t *popt, const isize_info_t *ii,uint64_t n_tot[2], uint64_t n_mapped[2])
 {
-	ubyte_t *pacseq;
-	int i;
-	uint64_t n_tot[2], n_mapped[2];
-
-	// load reference sequence
-	if (_pacseq == 0) pacseq = bwt_restore_pac(bns,0) ;
-	else pacseq = (ubyte_t*)_pacseq;
-	if (!popt->is_sw || ii->avg < 0.0) return pacseq;
-
-	// perform mate alignment
-	n_tot[0] = n_tot[1] = n_mapped[0] = n_mapped[1] = 0;
-	for (i = 0; i != n_seqs; ++i) {
-		bwa_seq_t *p[2];
-		p[0] = seqs[0] + i; p[1] = seqs[1] + i;
 		if ((p[0]->mapQ >= SW_MIN_MAPQ || p[1]->mapQ >= SW_MIN_MAPQ) && (p[0]->extra_flag&SAM_FPP) == 0) { // unpaired and one read has high mapQ
 			int k, n_cigar[2], is_singleton, mapQ = 0, mq_adjust[2];
 			int64_t beg[2], end[2];
@@ -563,10 +558,10 @@ ubyte_t *bwa_paired_sw(const bntseq_t *bns, const ubyte_t *_pacseq, int n_seqs, 
 			++n_tot[is_singleton];
 			cigar[0] = cigar[1] = 0;
 			n_cigar[0] = n_cigar[1] = 0;
-			if (popt->type != BWA_PET_STD && popt->type != BWA_PET_SOLID) continue; // other types of pairing is not considered
+			if (popt->type != BWA_PET_STD && popt->type != BWA_PET_SOLID) return; // other types of pairing is not considered
 			for (k = 0; k < 2; ++k) { // p[1-k] is the reference read and p[k] is the read considered to be modified
 				ubyte_t *seq;
-				if (p[1-k]->type == BWA_TYPE_NO_MATCH) continue; // if p[1-k] is unmapped, skip
+				if (p[1-k]->type == BWA_TYPE_NO_MATCH) return; // if p[1-k] is unmapped, skip
 				if (popt->type == BWA_PET_STD) {
 					if (p[1-k]->strand == 0) { // then the mate is on the reverse strand and has larger coordinate
 						__set_rght_coor(beg[k], end[k], p[1-k], p[k]);
@@ -635,6 +630,25 @@ ubyte_t *bwa_paired_sw(const bntseq_t *bns, const ubyte_t *_pacseq, int n_seqs, 
 			}
 			free(cigar[0]); free(cigar[1]);
 		}
+}
+
+ubyte_t *bwa_paired_sw(const bntseq_t *bns, const ubyte_t *_pacseq, int n_seqs, bwa_seq_t *seqs[2], const pe_opt_t *popt, const isize_info_t *ii)
+{
+	ubyte_t *pacseq;
+	int i;
+	uint64_t n_tot[2], n_mapped[2];
+
+	// load reference sequence
+	if (_pacseq == 0) pacseq = bwt_restore_pac(bns,0) ;
+	else pacseq = (ubyte_t*)_pacseq;
+	if (!popt->is_sw || ii->avg < 0.0) return pacseq;
+
+	// perform mate alignment
+	n_tot[0] = n_tot[1] = n_mapped[0] = n_mapped[1] = 0;
+	for (i = 0; i != n_seqs; ++i) {
+		bwa_seq_t *p[2];
+		p[0] = seqs[0] + i; p[1] = seqs[1] + i;
+        bwa_paired_sw1(bns,_pacseq,p,popt,ii,n_tot,n_mapped);
 	}
 	fprintf(stderr, "[bwa_paired_sw] %lld out of %lld Q%d singletons are mated.\n",
 			(long long)n_mapped[1], (long long)n_tot[1], SW_MIN_MAPQ);

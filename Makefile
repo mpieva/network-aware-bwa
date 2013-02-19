@@ -11,7 +11,8 @@ OBJS=		utils.o bwt.o bwtio.o bwtaln.o bwtgap.o is.o \
 			bntseq.o bwtmisc.o bwtindex.o stdaln.o simple_dp.o \
 			bwaseqio.o bwase.o bwape.o kstring.o cs2nt.o \
 			bwtsw2_core.o bwtsw2_main.o bwtsw2_aux.o bwt_lite.o \
-			bwtsw2_chain.o bamlite.o bam2bam.o bgzf.o
+			bwtsw2_chain.o bamlite.o bam2bam.o bgzf.o \
+			insert_size.o
 PROG=		bwa
 INCLUDES=	
 LIBS=		-lm -lz -lpthread -Lbwt_gen -lbwtgen

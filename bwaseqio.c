@@ -374,9 +374,9 @@ static int read_bam_pair_core(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broke
                         else return -2 ;
                     }
                 } else {
-                    // XXX This is arguably wrong, we discard a lone mate.  But what else could we do?  Buffering it
-                    //     somewhere to wait is too hard for the time being, returning it as a single means we need to buffer the
-                    //     next one.  Not very appealing.
+                    // This is arguably wrong, we discard a lone mate.  But what else could we do?  Buffering it
+                    // somewhere to wait is too hard for the time being, returning it as a single means we need to buffer the
+                    // next one.  Not very appealing.  So only two options remain: discard it or bail out.
                     fprintf( stderr, "[read_bam_pair] got two reads, but the names don't match (%s,%s).\n",
                             bam1_qname(&pair->bam_rec[0]), bam1_qname(&pair->bam_rec[1]) ) ;
                     try_get_sai( bs->sai, flag1 & BAM_FREAD1 ? 1 : 2, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) ;

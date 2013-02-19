@@ -289,7 +289,8 @@ char *bwa_cal_md1(int n_cigar, bwa_cigar_t *cigar, int len, bwtint_t pos, ubyte_
 				ksprintf(str, "%d", u);
 				kputc('^', str);
 				for (z = 0; z < l && pos < bns->l_pac; ++z) {
-					kputc(c>3?c:"ACGT"[get_pac], str);
+                    c = get_pac;
+					kputc(c>3?c:"ACGT"[c], str);
                     advance_pos() ;
                 }
 				u = 0;

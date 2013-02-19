@@ -87,6 +87,7 @@ extern "C" {
 	bam_header_t *bam_header_read(bamFile fp);
 	int bam_read1(bamFile fp, bam1_t *b);
 
+    const char *bam_get_rg( const bam1_t *b );
 #ifdef __cplusplus
 }
 #endif
