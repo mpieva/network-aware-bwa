@@ -153,3 +153,50 @@ int bam_read1(bamFile fp, bam1_t *b)
 	if (bam_is_be) swap_endian_data(c, b->data_len, b->data);
 	return 4 + block_len;
 }
+
+const char *bam_get_rg( const bam1_t *b ) 
+{
+    static char* the_rg = "\0" ;
+    const char *d = (const char*)bam1_aux(b);
+    unsigned l;
+    while(d+4 < (const char*)b->data+b->data_len) {
+        if(d[0]=='R' && d[1]=='G') {
+            if(d[2]=='Z') return d+3;
+            if(d[2]=='A') {
+                the_rg[0]=d[3] ;
+                return the_rg ;
+            }
+        }
+        switch(d[2]) {
+            case 'A':
+            case 'C':
+            case 'c': d+=4 ; break ;
+            case 'S':
+            case 's': d+=5 ; break ;
+            case 'I':
+            case 'i':
+            case 'f': d+=7 ; break ;
+            case 'd': d+=11 ; break ;
+            case 'Z':
+            case 'H': d+=3 ; while(*d) ++d ; ++d ; break ;
+            case 'B': l = (unsigned)d[4] | (unsigned)d[5] << 8 | (unsigned)d[6] << 16 | (unsigned)d[7] << 24 ;
+                      switch(d[3]) {
+                          case 'A':
+                          case 'C':
+                          case 'c': d+=8+l ; break ;
+                          case 'S':
+                          case 's': d+=8+2*l ; break ;
+                          case 'I':
+                          case 'i':
+                          case 'f': d+=8+4*l ; break ;
+                          case 'd': d+=8+8*l ; break ;
+                          default: exit(1) ;
+                      } 
+                      break ;
+            default: exit(1) ;
+        }
+    }
+    the_rg[0] = 0 ;
+    return the_rg ;
+}
+

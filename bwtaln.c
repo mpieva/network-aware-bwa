@@ -78,6 +78,18 @@ static int bwt_cal_width(const bwt_t *rbwt, int len, const ubyte_t *str, bwt_wid
 // Sweet.  As a side effect, this functions frees sequence, name,
 // quality.  Could at least have been documented instead of just worked
 // around.  :-/
+//
+// PRECONDITIONS
+//	ubyte_t *seq,           must be set
+//	       *rseq,           must be set
+//	uint32_t len:20,        must be set
+//	bwt_aln1_t *aln         will be discarded (not freed)
+//
+// POSTCONDITIONS
+//	int n_aln;                      will be filled
+//	bwt_aln1_t *aln;                will be filled
+//  int max_entries;                will be filled
+
 void bwa_cal_sa_reg_gap(bwt_t *const bwt[2], int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
 {
 	int i, max_l = 0, max_len;
@@ -173,8 +185,8 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt, i
 
 	{ // load BWT
 		char *str = (char*)calloc(strlen(prefix) + 10, 1);
-		strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str);
-		strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str);
+		strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,0);
+		strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,0);
 		free(str);
 	}
 

@@ -76,9 +76,8 @@ bwtint_t bwt_sa(const bwt_t *bwt, bwtint_t k)
 		++sa;
 		k = bwt_invPsi(bwt, k);
 	}
-	/* without setting bwt->sa[0] = -1, the following line should be
-	   changed to (sa + bwt->sa[k/bwt->sa_intv]) % (bwt->seq_len + 1) */
-	return sa + bwt->sa[k/bwt->sa_intv];
+	k = k / bwt->sa_intv ;
+    return sa + (k ? bwt->sa[k] : -1) ;
 }
 
 static inline int __occ_aux(uint64_t y, int c)

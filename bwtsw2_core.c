@@ -218,7 +218,7 @@ static void save_hits(const bwtl_t *bwt, int thres, bsw2hit_t *hits, bsw2entry_t
 		for (k = u->tk; k <= u->tl; ++k) {
 			int beg, end;
 			bsw2hit_t *q = 0;
-			beg = bwt->sa[k]; end = beg + p->tlen;
+			beg = k?bwt->sa[k]:-1; end = beg + p->tlen;
 			if (p->G > hits[beg*2].G) {
 				hits[beg*2+1] = hits[beg*2];
 				q = hits + beg * 2;
