@@ -896,7 +896,7 @@ void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
         switch( p->phase ) {
             case pristine: break ;
             case finished: break ;
-            case positioned: len += 29 + p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ;
+            case positioned: len += 37 + p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ;
                              // fallthrough!
             case aligned: len += 8 + p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ;
                           break ;
@@ -924,6 +924,8 @@ void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
                              *q++ = p->bwa_seq[i].n_gapo ;
                              *q++ = p->bwa_seq[i].n_gape ;
                              *q++ = p->bwa_seq[i].seQ ;
+                             put_int( &q, p->bwa_seq[i].len ) ;
+                             put_int( &q, p->bwa_seq[i].clip_len ) ;
                              put_int( &q, p->bwa_seq[i].score ) ;
                              put_int( &q, p->bwa_seq[i].sa ) ;
                              put_int( &q, p->bwa_seq[i].c1 ) ;
@@ -982,6 +984,8 @@ void pair_init_from_msg(bam_pair_t *p, zmq_msg_t *m)
                              p->bwa_seq[i].n_gapo = *q++ ;
                              p->bwa_seq[i].n_gape = *q++ ;
                              p->bwa_seq[i].seQ    = p->bwa_seq[i].mapQ = *q++ ;
+                             p->bwa_seq[i].len    = get_int( &q ) ;
+                             p->bwa_seq[i].clip_len=get_int( &q ) ;
                              p->bwa_seq[i].score  = get_int( &q ) ;
                              p->bwa_seq[i].sa     = get_int( &q ) ;
                              p->bwa_seq[i].c1     = get_int( &q ) ;

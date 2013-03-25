@@ -290,7 +290,7 @@ void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp)
         seq_reverse(p->len, p->seq, 1);
         seq_reverse(p->len, p->qual, 0);
     }
-    // if (trim_qual >= 1) n_trimmed += bwa_trim_read(trim_qual, p);
+    if (trim_qual >= 1) /* n_trimmed += */ bwa_trim_read(trim_qual, p);
     p->rseq = (ubyte_t*)calloc(p->full_len, 1);
     memcpy(p->rseq, p->seq, p->len);
     seq_reverse(p->len, p->seq, 0); // *IMPORTANT*: will be reversed back in bwa_refine_gapped()
