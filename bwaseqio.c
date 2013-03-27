@@ -269,7 +269,7 @@ void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs)
 }
 
 // Mostly stolen from bwa_read_bam.
-void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp)
+void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp, int trim_qual)
 {
     // long n_trimmed = 0;
 
@@ -301,6 +301,7 @@ void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp)
     // anyway.
     // p->name = strdup((const char*)bam1_qname(raw));
 
+    // No place to put the tally right now.
     // if (n_seqs && trim_qual >= 1)
     // fprintf(stderr, "[bwa_read_seq] %.1f%% bases are trimmed.\n", 100.0f * n_trimmed/n_tot);
 }

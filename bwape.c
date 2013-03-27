@@ -692,15 +692,13 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 	if (!(opt.mode & BWA_MODE_COMPREAD)) {
 		popt->type = BWA_PET_SOLID;
 		ntbns = bwa_open_nt(prefix);
-	} else { // for Illumina alignment only
-		if (popt->is_preload) {
-			strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,0);
-			strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0],0);
-			strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,0);
-			strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1],0);
-			pac = bwt_restore_pac(bns,0);
-		}
-	}
+    } else { // for Illumina alignment only
+        strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str,0);
+        strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0],0);
+        strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str,0);
+        strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1],0);
+        pac = bwt_restore_pac(bns,0);
+    }
 
 	// core loop
 	bwa_print_sam_SQ(bns);

@@ -483,7 +483,7 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 		if (p->strand) flag |= SAM_FSR;
 		if (mate) {
 			if (mate->type != BWA_TYPE_NO_MATCH) {
-                int m_seqid, m_j;
+                int m_j;
                 // redundant calculation here, but should not matter too much
                 nn += bns_coor_pac2real(bns, mate->pos, mate->len, &m_seqid);
 

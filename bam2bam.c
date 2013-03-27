@@ -106,6 +106,7 @@ static int       listen_port  = 0;
 
 static bwa_seqio_t *ks;
 static isize_info_t null_ii = {0} ;
+static volatile khash_t(isize_infos) *g_iinfos = 0;
 
 static uint8_t revcom1[256] ;
 static void init_revcom1()
@@ -598,7 +599,7 @@ static void aln_singleton( bam_pair_t *raw )
     // because the firs phase has already run), we skip the alignment.
     // (This point shouldn't actually be reached in that case.)
     if(raw->phase == pristine) {
-        bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1);
+        bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1, gap_opt->trim_qual);
         bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[0], gap_opt);
         raw->phase = aligned ;
     }
@@ -627,7 +628,7 @@ static void finish_singleton( bam_pair_t *raw )
 {
     if( raw->phase == positioned ) {
         bwa_seq_t *p = &raw->bwa_seq[0] ;
-        if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1);
+        if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1, gap_opt->trim_qual);
         bwa_refine_gapped(bns, 1, p, pac, ntbns);
         bwa_update_bam1(&raw->bam_rec[0], bns, p, 0, gap_opt->mode, gap_opt->max_top2);
         bwa_free_read_seq1(p);
@@ -643,7 +644,7 @@ static void aln_pair( bam_pair_t *raw )
     int j ;
     if( raw->phase == pristine ) {
         for( j = 0 ; j != 2 ; ++j ) {
-            bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1);
+            bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1, gap_opt->trim_qual);
 
             // BEGIN from bwa_sai2sam_pe_core
             // BEGIN from bwa_cal_pac_pos_pe
@@ -692,7 +693,7 @@ static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t
         memset(&d, 0, sizeof(pe_data_t));
         for (j = 0; j < 2; ++j) 
         {
-            if( !raw->bwa_seq[j].seq ) bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1);
+            if( !raw->bwa_seq[j].seq ) bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1, gap_opt->trim_qual);
             if(p[j]->n_aln > kv_max(d.aln[j]))
                 kv_resize(bwt_aln1_t, d.aln[j], p[j]->n_aln);
             memcpy(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t));
@@ -1662,10 +1663,13 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
         zmq_term( zmq_context ) ;
     }
 
-    // XXX this only works if we loaded the index.  If called with "-t0"
-    // and a port number, we will blow up here.  Needs to be fixed soon.
     gzclose( tmpout ) ;
     infer_all_isizes( iinfos, pe_opt->ap_prior, LLL ) ;
+    g_iinfos = iinfos ;
+    // broadcast here... iff we're networked
+
+    // XXX this only works if we loaded the index.  If called with "-t0"
+    // and a port number, we will blow up here.  Needs to be fixed soon.
     lseek(tmpfd2, 0, SEEK_SET);
     gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
     sequential_loop_pass2( tmpin, output, iinfos ) ;

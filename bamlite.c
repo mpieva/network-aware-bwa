@@ -156,7 +156,7 @@ int bam_read1(bamFile fp, bam1_t *b)
 
 const char *bam_get_rg( const bam1_t *b ) 
 {
-    static char* the_rg = "\0" ;
+    static char the_rg[2] = {0,0};
     const char *d = (const char*)bam1_aux(b);
     unsigned l;
     while(d+4 < (const char*)b->data+b->data_len) {
