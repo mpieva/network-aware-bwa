@@ -22,6 +22,7 @@
 #define SAM_FR2 128 // this is read two
 #define SAM_FSC 256 // secondary alignment
 #define SAM_FQC 512 // fails quality control
+#define SAM_FDP 1024 // is a duplicate
 
 #define BWA_AVG_ERR 0.02
 #define BWA_MIN_RDLEN 35 // for read trimming

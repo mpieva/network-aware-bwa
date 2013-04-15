@@ -12,7 +12,7 @@ static const int timeout = 30;
  */
 
 // XXX get this from bwt, even if the master doesn't load the whole bwt!
-#define LLL 3000000000
+#define LLL 3000000000ULL
 
 #include "bamlite.h"
 #include "bwtaln.h"
@@ -827,6 +827,17 @@ void init_genome_index( const char* prefix, int touch )
     fprintf(stderr, "%.2f sec\n", tdiff(&tv, &tv1));
 }
 
+int unique(bam_pair_t *p)
+{
+    switch (p->kind) {
+        case eof_marker:  return 0;
+        case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
+        case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
+                              && !(p->bam_rec[1].core.flag & SAM_FDP) ;
+    }
+    return 1;
+}
+
 void pair_aln(bam_pair_t *p)
 {
     switch (p->kind) {
@@ -1036,7 +1047,7 @@ int read_pair_custom( gzFile f, bam_pair_t *p )
 // to "classic" BWA, we stop that blockwise nonsense and get exactly one
 // singleton or pair per iteration.
 //
-void sequential_loop_pass1( gzFile* temporary, khash_t(isize_infos) *iinfos )
+void sequential_loop_pass1( gzFile temporary, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
     gettimeofday( &tv0, 0 ) ;
@@ -1058,9 +1069,11 @@ void sequential_loop_pass1( gzFile* temporary, khash_t(isize_infos) *iinfos )
             fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
-        pair_aln(&raw);
-        pair_posn(&raw);
-        improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
+        if(unique(&raw)) {
+            pair_aln(&raw);
+            pair_posn(&raw);
+            improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
+        }
         pair_print_custom(temporary,&raw);
         bam_destroy_pair(&raw);
     }
@@ -1070,7 +1083,7 @@ void sequential_loop_pass1( gzFile* temporary, khash_t(isize_infos) *iinfos )
     fprintf(stderr, "[%s] finished cleanly.\n", __FUNCTION__);
 }
 
-void sequential_loop_pass2( BGZF* temporary, BGZF* output, khash_t(isize_infos) *iinfos )
+void sequential_loop_pass2( gzFile temporary, BGZF* output, khash_t(isize_infos) *iinfos )
 {
     uint64_t n_tot[2]={0,0}, n_mapped[2]={0,0};
     struct timeval tv0, tv1 ;
@@ -1092,7 +1105,7 @@ void sequential_loop_pass2( BGZF* temporary, BGZF* output, khash_t(isize_infos) 
             fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
-        pair_finish(&raw, iinfos, n_tot, n_mapped);
+        if(unique(&raw)) pair_finish(&raw, iinfos, n_tot, n_mapped);
         pair_print_bam(output,&raw);
         bam_destroy_pair(&raw);
     }
