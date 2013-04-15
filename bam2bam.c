@@ -12,7 +12,7 @@ static const int timeout = 30;
  */
 
 // XXX get this from bwt, even if the master doesn't load the whole bwt!
-#define LLL 3000000000
+#define LLL 3000000000ULL
 
 #include "bamlite.h"
 #include "bwtaln.h"
@@ -598,7 +598,7 @@ static void aln_singleton( bam_pair_t *raw )
     // because the firs phase has already run), we skip the alignment.
     // (This point shouldn't actually be reached in that case.)
     if(raw->phase == pristine) {
-        bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1);
+        bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1, gap_opt->trim_qual);
         bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[0], gap_opt);
         raw->phase = aligned ;
     }
@@ -627,7 +627,7 @@ static void finish_singleton( bam_pair_t *raw )
 {
     if( raw->phase == positioned ) {
         bwa_seq_t *p = &raw->bwa_seq[0] ;
-        if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1);
+        if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1, gap_opt->trim_qual);
         bwa_refine_gapped(bns, 1, p, pac, ntbns);
         bwa_update_bam1(&raw->bam_rec[0], bns, p, 0, gap_opt->mode, gap_opt->max_top2);
         bwa_free_read_seq1(p);
@@ -643,7 +643,7 @@ static void aln_pair( bam_pair_t *raw )
     int j ;
     if( raw->phase == pristine ) {
         for( j = 0 ; j != 2 ; ++j ) {
-            bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1);
+            bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1, gap_opt->trim_qual);
 
             // BEGIN from bwa_sai2sam_pe_core
             // BEGIN from bwa_cal_pac_pos_pe
@@ -692,7 +692,7 @@ static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t
         memset(&d, 0, sizeof(pe_data_t));
         for (j = 0; j < 2; ++j) 
         {
-            if( !raw->bwa_seq[j].seq ) bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1);
+            if( !raw->bwa_seq[j].seq ) bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1, gap_opt->trim_qual);
             if(p[j]->n_aln > kv_max(d.aln[j]))
                 kv_resize(bwt_aln1_t, d.aln[j], p[j]->n_aln);
             memcpy(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t));
@@ -824,6 +824,17 @@ void init_genome_index( const char* prefix, int touch )
     pac = bwt_restore_pac( bns,touch ) ;
     gettimeofday( &tv1, 0 ) ;
     fprintf(stderr, "%.2f sec\n", tdiff(&tv, &tv1));
+}
+
+int unique(bam_pair_t *p)
+{
+    switch (p->kind) {
+        case eof_marker:  return 0;
+        case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
+        case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
+                              && !(p->bam_rec[1].core.flag & SAM_FDP) ;
+    }
+    return 1;
 }
 
 void pair_aln(bam_pair_t *p)
@@ -1035,7 +1046,7 @@ int read_pair_custom( gzFile f, bam_pair_t *p )
 // to "classic" BWA, we stop that blockwise nonsense and get exactly one
 // singleton or pair per iteration.
 //
-void sequential_loop_pass1( gzFile* temporary, khash_t(isize_infos) *iinfos )
+void sequential_loop_pass1( gzFile temporary, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
     gettimeofday( &tv0, 0 ) ;
@@ -1057,9 +1068,11 @@ void sequential_loop_pass1( gzFile* temporary, khash_t(isize_infos) *iinfos )
             fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
-        pair_aln(&raw);
-        pair_posn(&raw);
-        improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
+        if(unique(&raw)) {
+            pair_aln(&raw);
+            pair_posn(&raw);
+            improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
+        }
         pair_print_custom(temporary,&raw);
         bam_destroy_pair(&raw);
     }
@@ -1069,7 +1082,7 @@ void sequential_loop_pass1( gzFile* temporary, khash_t(isize_infos) *iinfos )
     fprintf(stderr, "[%s] finished cleanly.\n", __FUNCTION__);
 }
 
-void sequential_loop_pass2( BGZF* temporary, BGZF* output, khash_t(isize_infos) *iinfos )
+void sequential_loop_pass2( gzFile temporary, BGZF* output, khash_t(isize_infos) *iinfos )
 {
     uint64_t n_tot[2]={0,0}, n_mapped[2]={0,0};
     struct timeval tv0, tv1 ;
@@ -1091,7 +1104,7 @@ void sequential_loop_pass2( BGZF* temporary, BGZF* output, khash_t(isize_infos) 
             fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
-        pair_finish(&raw, iinfos, n_tot, n_mapped);
+        if(unique(&raw)) pair_finish(&raw, iinfos, n_tot, n_mapped);
         pair_print_bam(output,&raw);
         bam_destroy_pair(&raw);
     }

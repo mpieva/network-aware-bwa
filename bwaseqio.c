@@ -269,7 +269,7 @@ void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs)
 }
 
 // Mostly stolen from bwa_read_bam.
-void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp)
+void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp, int trim_qual)
 {
     // long n_trimmed = 0;
 

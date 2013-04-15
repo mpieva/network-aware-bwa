@@ -22,6 +22,7 @@
 #define SAM_FR2 128 // this is read two
 #define SAM_FSC 256 // secondary alignment
 #define SAM_FQC 512 // fails quality control
+#define SAM_FDP 1024 // is a duplicate
 
 #define BWA_AVG_ERR 0.02
 #define BWA_MIN_RDLEN 35 // for read trimming
@@ -177,7 +178,7 @@ extern "C" {
 	void bwa_seq_close(bwa_seqio_t *bs);
 	void seq_reverse(int len, ubyte_t *seq, int is_comp);
     int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken);
-    void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp);
+    void bam1_to_seq(bam1_t *raw, bwa_seq_t *p, int is_comp, int trim_qual);
 	bwa_seq_t *bwa_read_seq(bwa_seqio_t *seq, int n_needed, int *n, int mode, int trim_qual);
     void bwa_free_read_seq1(bwa_seq_t *p);
 	void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs);
