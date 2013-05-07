@@ -11,6 +11,11 @@ static const int timeout = 30;
  * options, maybe even some more.
  */
 
+// XXX we'd like to give duplicate reads the same coordinates that their
+//     representative got, assuming the latter is available.  That's a
+//     little hard to do right now; it needs to go into the bam writer
+//     thread and into sequential_loop_pass2.
+
 // XXX get this from bwt, even if the master doesn't load the whole bwt!
 #define LLL 3000000000ULL
 
@@ -1585,7 +1590,9 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
     } 
     
     int tmpfd1 = mkstemp( tmpname ) ;
+    xassert( tmpfd1, "could not create temporary file" ) ;
     int tmpfd2 = dup(tmpfd1) ;
+    xassert( tmpfd1, "could not duplicate file descriptor" ) ;
 
     gzFile tmpout = gzdopen( tmpfd1, "wb2" ) ;
     
@@ -1683,7 +1690,9 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
 
     // XXX this only works if we loaded the index.  If called with "-t0"
     // and a port number, we will blow up here.  Needs to be fixed soon.
-    lseek(tmpfd2, 0, SEEK_SET);
+    off_t new_off = lseek(tmpfd2, 0, SEEK_SET) ;
+    xassert( new_off == 0, "failed to seek in temporary file" ) ;
+
     gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
     sequential_loop_pass2( tmpin, output, iinfos ) ;
     gzclose( tmpin ) ;

@@ -1,0 +1,79 @@
+Strategy for paired end data: Originally, bwa operated on a block
+at a time, did alignments, inferred insert size, rescued mates.  This
+is no longer possible.  Instead, we will run in two passes, the first
+estimating insert sizes per read group(!), the second rescuing mates.
+Intermediate data is stored in a file (in an ad-hoc format, reusing the
+0MQ message layout). 
+
+The steps for paired end alignment:
+   bwa_cal_sa_reg_gap        fills n_aln, aln, max_entries
+   bwa_aln2seq               fills strand, type, n_mm, n_gapo,
+                                   n_gape, score, sa, c1, c2,
+                                   n_multi, multi
+   bwa_cal_pac_pos_core      fills mapQ, pos, seQ
+
+Suppose we want a first step that runs in <3GB (~old bwa aln), a
+second step that completes the coordinate calculation (but needs
+~3.2GB), and a third step that does mate pair rescue and finishes the
+job, but needs ~5GB, the outline would look like this:
+
+We will have three distinct steps, individually distributed over the
+network:
+
+- simple alignment, which needs only 2.2GB of RAM (the old "bwa aln", to
+  become "small worker")
+- coordinate computation (needs >3GB but no ISIZE estimate, to be part
+  of the "full worker")
+- finishing (needs up to 5GB *and* ISIZE, to be part of the "full
+  worker")
+
+We will use two sockets: one carries input to the first stage or output
+from it, the other carries input to the second or third stage or its
+output.  We need these message types:
+
+1  unprocessed logical BAM record
+2  logical BAM record with alignments
+3  logical BAM record with coordinates
+4  finished logical BAM record
+
+A small worker would connect only on the first socket, a full worker
+connects on both, accepts records with coordinates in preference to
+pristine ones (to avoid stalling the small workers it is downstream
+from), and would only reply with finished data.
+
+Our multiplexer must check incoming data: fresh records go out on the
+first socket, those with alignments on the second, those with positions
+(this happens on the second pass only) again to the second socket.
+Stuff coming in from the first socket is immediately pushed to the
+second (no queueing/reordering, it's not worth the hassle).  Stuff
+coming in from the second goes to output.  (Can we use the exact same
+multiplexer twice?  I think so; the worker connections can stay the
+same, only input and output acquire different purposes.)
+
+TODO:
+
+- second pass should run in parallel, too
+
+- workers need to be informed about insert size estimates (when
+  transmitting the configuration) and updated (broadcast, before
+  starting the second pass).
+  . we can add iinfo to the config as soon as it's valid, we can also
+    broadcast it over the existing channel
+  . must somehow distinguish it from the shutdown message
+  . bwa_worker_core can handle the reception of iinfo
+  . a single volatile global var should work fine (there's only ever one
+    writer)
+
+- io_multiplexor needs to understand the phases for the second pass  
+  . reconnecting input and output would be enough, if there wasn't an
+    internal check for 'phase >= positioned' or something.  Maybe pass
+    the threshold phase in?
+
+- need to pass the correct genome length in (for LLL)
+
+MEM CONSUMPTION:
+
+ - alignment needs both bwts: 2.3GB
+ - first stage (alignment+compute pos) needs bwts and sas: 3.1GB
+ - only SW needs the pacs in addition: 4.6GB
+
