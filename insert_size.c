@@ -41,6 +41,7 @@
  */
 
 #include "bwape.h"
+#include "utils.h"
 #include <math.h>
 
 #define MAX_ISIZE 100000
@@ -170,3 +171,44 @@ void infer_all_isizes( khash_t(isize_infos) *iinfos, double ap_prior, int64_t L)
         if(kh_exist(iinfos,k) && kh_value(iinfos,k).hist )
             infer_isize_hist(kh_key(iinfos,k), &kh_value(iinfos,k), ap_prior, L) ;
 }
+
+int iinfo_encoded_size( khash_t(isize_infos) *iinfos )
+{
+    int sz = 0 ;
+    khiter_t k;
+    for(k = kh_begin(iinfos); k != kh_end(iinfos); ++k)
+        if(kh_exist(iinfos,k) && kh_value(iinfos,k).hist )
+            sz += strlen( kh_key(iinfos,k) ) + 1 + sizeof(isize_info_t) ;
+    return sz ;
+}
+
+char *encode_iinfo( char* p, khash_t(isize_infos) *iinfos )
+{
+    khiter_t k;
+    for(k = kh_begin(iinfos); k != kh_end(iinfos); ++k)
+        if(kh_exist(iinfos,k) && kh_value(iinfos,k).hist )
+        {
+            strcpy( p, kh_key(iinfos,k) ) ;
+            p += strlen(kh_key(iinfos,k))+1 ;
+            memcpy( p, &kh_value(iinfos,k), sizeof(isize_info_t) ) ;
+            p += sizeof(isize_info_t) ;
+        }
+    return p ;
+}
+
+khash_t(isize_infos) *decode_iinfo( char *p, char *q )
+{
+    khash_t(isize_infos) *iinfos = kh_init(isize_infos) ;
+    while( p != q ) {
+        int ret = 0 ;
+        char *k = strdup( p ) ;
+        p += strlen(k)+1 ;
+
+        khiter_t it = kh_put(isize_infos, iinfos, k, &ret) ;
+        memcpy( &kh_value(iinfos, it), p, sizeof(isize_info_t) ) ;
+        p += sizeof(isize_info_t) ;
+        xassert( p <= q, "error when decoding isize info" ) ;
+    }
+    return iinfos ;
+}
+

@@ -2,4 +2,5 @@
 bwa
 depend.mk
 tags
+bwt_gen/libbwtgen.a
 

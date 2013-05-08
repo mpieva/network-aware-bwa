@@ -10,6 +10,9 @@ typedef struct {
 	bwtint_t *a;
 } poslist_t;
 
+// When running in two passes, 'hist' is first filled in, but then
+// cleared once there is enough data to compute the other fields.
+// Therefore, there is no need to pass an array to pass two.
 typedef struct {
     unsigned short *hist ;
 	double avg, std, ap_prior;
@@ -49,6 +52,9 @@ KHASH_MAP_INIT_STR(isize_infos, isize_info_t) ;
 
 void improve_isize_est(khash_t(isize_infos) *iinfos, bam_pair_t *p, double ap_prior, int64_t);
 void infer_all_isizes( khash_t(isize_infos) *iinfos, double ap_prior, int64_t);
+int iinfo_encoded_size( khash_t(isize_infos) *iinfos ) ;
+char *encode_iinfo( char* p, khash_t(isize_infos) *iinfos ) ;
+khash_t(isize_infos) *decode_iinfo( char *p, char *q ) ;
 
 #endif
 

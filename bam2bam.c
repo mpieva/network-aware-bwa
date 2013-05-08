@@ -109,9 +109,8 @@ static int       max_run_time = 90;
 static void      *zmq_context = 0;
 static int       listen_port  = 0;
 
-static bwa_seqio_t *ks;
 static isize_info_t null_ii = {0} ;
-static volatile khash_t(isize_infos) *g_iinfos = 0;
+static khash_t(isize_infos) * volatile g_iinfos = 0;
 
 static uint8_t revcom1[256] ;
 static void init_revcom1()
@@ -598,14 +597,27 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 	}
 }
 
+static int unique(bam_pair_t *p)
+{
+    switch (p->kind) {
+        case eof_marker:  return 0;
+        case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
+        case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
+                              && !(p->bam_rec[1].core.flag & SAM_FDP) ;
+    }
+    return 1;
+}
+
 static void aln_singleton( bam_pair_t *raw )
 {
     // If we already have alignments (could come from sai file or
     // because the firs phase has already run), we skip the alignment.
     // (This point shouldn't actually be reached in that case.)
     if(raw->phase == pristine) {
-        bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1, gap_opt->trim_qual);
-        bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[0], gap_opt);
+        if(unique(raw)) {
+            bam1_to_seq(&raw->bam_rec[0], &raw->bwa_seq[0], 1, gap_opt->trim_qual);
+            bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[0], gap_opt);
+        }
         raw->phase = aligned ;
     }
 }
@@ -614,16 +626,18 @@ static void posn_singleton( bam_pair_t *raw )
 {
     int j ;
     if( raw->phase == aligned ) {
-        // from bwa_sai2sam_se_core
-        bwa_seq_t *p = &raw->bwa_seq[0] ;
-        bwa_aln2seq_core(p->n_aln, p->aln, p, 1, pe_opt->max_occ_se );
+        if(unique(raw)) {
+            // from bwa_sai2sam_se_core
+            bwa_seq_t *p = &raw->bwa_seq[0] ;
+            bwa_aln2seq_core(p->n_aln, p->aln, p, 1, pe_opt->max_occ_se );
 
-        // from bwa_cal_pac_pos
-        bwa_cal_pac_pos_core(bwt[0], bwt[1], p, gap_opt->max_diff, gap_opt->fnr);
-        for (j = 0; j < p->n_multi; ++j) {
-            bwt_multi1_t *q = raw->bwa_seq[0].multi + j;
-            if (q->strand) q->pos = bwt_sa(bwt[0], q->pos);
-            else q->pos = bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p->len);
+            // from bwa_cal_pac_pos
+            bwa_cal_pac_pos_core(bwt[0], bwt[1], p, gap_opt->max_diff, gap_opt->fnr);
+            for (j = 0; j < p->n_multi; ++j) {
+                bwt_multi1_t *q = raw->bwa_seq[0].multi + j;
+                if (q->strand) q->pos = bwt_sa(bwt[0], q->pos);
+                else q->pos = bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p->len);
+            }
         }
         raw->phase = positioned ;
     }
@@ -632,11 +646,13 @@ static void posn_singleton( bam_pair_t *raw )
 static void finish_singleton( bam_pair_t *raw )
 {
     if( raw->phase == positioned ) {
-        bwa_seq_t *p = &raw->bwa_seq[0] ;
-        if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1, gap_opt->trim_qual);
-        bwa_refine_gapped(bns, 1, p, pac, ntbns);
-        bwa_update_bam1(&raw->bam_rec[0], bns, p, 0, gap_opt->mode, gap_opt->max_top2);
-        bwa_free_read_seq1(p);
+        if(unique(raw)) {
+            bwa_seq_t *p = &raw->bwa_seq[0] ;
+            if( !p->seq ) bam1_to_seq(&raw->bam_rec[0], p, 1, gap_opt->trim_qual);
+            bwa_refine_gapped(bns, 1, p, pac, ntbns);
+            bwa_update_bam1(&raw->bam_rec[0], bns, p, 0, gap_opt->mode, gap_opt->max_top2);
+            bwa_free_read_seq1(p);
+        }
         raw->phase = finished ;
     }
 }
@@ -648,18 +664,20 @@ static void aln_pair( bam_pair_t *raw )
 {
     int j ;
     if( raw->phase == pristine ) {
-        for( j = 0 ; j != 2 ; ++j ) {
-            bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1, gap_opt->trim_qual);
+        if(unique(raw)) {
+            for( j = 0 ; j != 2 ; ++j ) {
+                bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1, gap_opt->trim_qual);
 
-            // BEGIN from bwa_sai2sam_pe_core
-            // BEGIN from bwa_cal_pac_pos_pe
-            // note that seqs is not an array of two arrays anymore!!
-            // also note that we don't track this
-            // cnt_chg... whatever it was good
-            // for.
-            // cnt_chg = bwa_cal_pac_pos_pe(seqs, &ii, &last_ii);
+                // BEGIN from bwa_sai2sam_pe_core
+                // BEGIN from bwa_cal_pac_pos_pe
+                // note that seqs is not an array of two arrays anymore!!
+                // also note that we don't track this
+                // cnt_chg... whatever it was good
+                // for.
+                // cnt_chg = bwa_cal_pac_pos_pe(seqs, &ii, &last_ii);
 
-            bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[j], gap_opt);
+                bwa_cal_sa_reg_gap(bwt, 1, &raw->bwa_seq[j], gap_opt);
+            }
         }
         raw->phase = aligned ;
     }
@@ -669,17 +687,19 @@ static void posn_pair( bam_pair_t *raw )
 {
     int j ;
     if( raw->phase == aligned ) {
-        for( j = 0 ; j != 2 ; ++j ) {
-            // SE part.  Almost, but not quite the
-            // same as for singletons.  (*sigh*)
-            raw->bwa_seq[j].n_multi = 0 ;
+        if(unique(raw)) {
+            for( j = 0 ; j != 2 ; ++j ) {
+                // SE part.  Almost, but not quite the
+                // same as for singletons.  (*sigh*)
+                raw->bwa_seq[j].n_multi = 0 ;
 
-            // generate SE alignment and mapping quality
-            bwa_aln2seq(raw->bwa_seq[j].n_aln, raw->bwa_seq[j].aln, &raw->bwa_seq[j]);
+                // generate SE alignment and mapping quality
+                bwa_aln2seq(raw->bwa_seq[j].n_aln, raw->bwa_seq[j].aln, &raw->bwa_seq[j]);
 
-            // Computes pos, seQ, mapQ.  need to store only those to avoid
-            // repeated computation!
-            bwa_cal_pac_pos_core(bwt[0], bwt[1], &raw->bwa_seq[j], gap_opt->max_diff, gap_opt->fnr);
+                // Computes pos, seQ, mapQ.  need to store only those to avoid
+                // repeated computation!
+                bwa_cal_pac_pos_core(bwt[0], bwt[1], &raw->bwa_seq[j], gap_opt->max_diff, gap_opt->fnr);
+            }
         }
         raw->phase = positioned ;
     }
@@ -687,7 +707,7 @@ static void posn_pair( bam_pair_t *raw )
 
 static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t n_tot[2], uint64_t n_mapped[2] )
 {
-    if( raw->phase == positioned ) {
+    if( raw->phase == positioned && unique(raw) ) {
         bwa_seq_t *p[2] = { raw->bwa_seq, raw->bwa_seq+1 } ;
         pe_data_t d; // Is this copy even needed?!
         int j;
@@ -800,6 +820,7 @@ static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t
         bwa_free_read_seq1(&raw->bwa_seq[0]);
         raw->phase = finished ;
     }
+    else if( raw->phase == positioned ) raw->phase = finished ;
 }
 
 static inline double tdiff( struct timeval* tv1, struct timeval *tv2 )
@@ -830,17 +851,6 @@ void init_genome_index( const char* prefix, int touch )
     pac = bwt_restore_pac( bns,touch ) ;
     gettimeofday( &tv1, 0 ) ;
     fprintf(stderr, "%.2f sec\n", tdiff(&tv, &tv1));
-}
-
-int unique(bam_pair_t *p)
-{
-    switch (p->kind) {
-        case eof_marker:  return 0;
-        case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
-        case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
-                              && !(p->bam_rec[1].core.flag & SAM_FDP) ;
-    }
-    return 1;
 }
 
 void pair_aln(bam_pair_t *p)
@@ -1044,15 +1054,18 @@ int read_pair_custom( gzFile f, bam_pair_t *p )
         zmq_msg_close(&m);
         return p->kind;
     }
-    else return 0;
+    else
+    {
+        memset(p, 0, sizeof(bam_pair_t)) ;
+        return 0;
+    }
 }
 
 // This is the simple sequential loop:  We run it if exactly one thread
 // and no listening port is requested.  Doesn't require 0MQ.  As opposed
 // to "classic" BWA, we stop that blockwise nonsense and get exactly one
 // singleton or pair per iteration.
-//
-void sequential_loop_pass1( gzFile temporary, khash_t(isize_infos) *iinfos )
+void sequential_loop_pass1( bwa_seqio_t *ks, gzFile temporary, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
     gettimeofday( &tv0, 0 ) ;
@@ -1074,11 +1087,10 @@ void sequential_loop_pass1( gzFile temporary, khash_t(isize_infos) *iinfos )
             fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
-        if(unique(&raw)) {
-            pair_aln(&raw);
-            pair_posn(&raw);
-            improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
-        }
+        pair_aln(&raw);
+        pair_posn(&raw);
+        if(unique(&raw)) improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
+
         pair_print_custom(temporary,&raw);
         bam_destroy_pair(&raw);
     }
@@ -1110,7 +1122,7 @@ void sequential_loop_pass2( gzFile temporary, BGZF* output, khash_t(isize_infos)
             fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
-        if(unique(&raw)) pair_finish(&raw, iinfos, n_tot, n_mapped);
+        pair_finish(&raw, iinfos, n_tot, n_mapped);
         pair_print_bam(output,&raw);
         bam_destroy_pair(&raw);
     }
@@ -1161,10 +1173,16 @@ void *run_config_service( void *arg )
                 (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
         zmq_msg_close(&m) ;
 
-        zmq_msg_init_size(&m, sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix));
+        zmq_msg_init_size(&m, sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix) + 1
+                + (g_iinfos ? iinfo_encoded_size(g_iinfos) : 0) ) ;
         memcpy(zmq_msg_data(&m),                                       gap_opt, sizeof(gap_opt_t));
         memcpy(zmq_msg_data(&m) + sizeof(gap_opt_t),                    pe_opt, sizeof(pe_opt_t));
-        memcpy(zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t), prefix, strlen(prefix));
+        strcpy(zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t), prefix );
+        if( g_iinfos )
+        {
+            char *q = encode_iinfo( zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix)+1, g_iinfos ) ;
+            xassert( q == zmq_msg_data(&m) + zmq_msg_size(&m), "encoding of config failed" ) ;
+        }
         zterm( zmq_msg_send(&m, socket, 0), 1, "zmq_send failed" ) break;
         zmq_msg_close(&m) ;
     }
@@ -1174,15 +1192,26 @@ void *run_config_service( void *arg )
 }
 
     
+struct reader_thread_args {
+    void *socket ;
+    bwa_seqio_t *ks;
+    gzFile gzf ;
+} ;
 
-void *run_reader_thread( void* socket )
+
+void *run_reader_thread( void* vargs )
 {
+    struct reader_thread_args *args = vargs ;
+
     int recno = 0, rc=0;
     bam_pair_t raw;
     zmq_msg_t msg;
     bam_init_pair(&raw);
     while (!s_interrupted) {
-        rc=read_bam_pair(ks, &raw, broken_input);
+        if( args->ks ) rc=read_bam_pair(args->ks, &raw, broken_input);
+        else rc=read_pair_custom(args->gzf, &raw);
+
+        if(!rc) break ;
         if(rc<0) {
             fprintf( stderr, "[run_reader_thread] error reading input BAM %s\n",
                     rc==-2 ? "(lone mate)" : "" ) ;
@@ -1193,7 +1222,7 @@ void *run_reader_thread( void* socket )
         if(!(recno%CHUNKSIZE)) fprintf( stderr, "[run_reader_thread] %d records read so far.\n", recno );
         msg_init_from_pair( &msg, &raw );
         bam_destroy_pair(&raw);
-        zterm( zmq_msg_send(&msg, socket, 0), 1, "zmq_send failed" ) break;
+        zterm( zmq_msg_send(&msg, args->socket, 0), 1, "zmq_send failed" ) break;
         zmq_msg_close(&msg);
     }
 
@@ -1203,15 +1232,15 @@ void *run_reader_thread( void* socket )
         raw.recno = recno++;
         msg_init_from_pair( &msg, &raw );
         bam_destroy_pair(&raw);
-        zterm( zmq_msg_send(&msg, socket, 0), 0, "zmq_send failed" );
+        zterm( zmq_msg_send(&msg, args->socket, 0), 0, "zmq_send failed" );
         fprintf( stderr, "[run_reader_thread] finished, %d records in total.\n", recno );
         zmq_msg_close(&msg);
     }
-    zmq_close(socket);
+    zmq_close(args->socket);
     return 0;
 }
  
-void *run_output_thread( gzFile output, void* socket, khash_t(isize_infos) *iinfos )
+void *run_output_thread( BGZF *ks, gzFile output, void* socket, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
     int lastrn = 0 ;
@@ -1240,12 +1269,13 @@ void *run_output_thread( gzFile output, void* socket, khash_t(isize_infos) *iinf
                 memmove( &tv0, &tv1, sizeof(struct timeval) ) ;
             }
         }
-        improve_isize_est(iinfos, &pair, pe_opt->ap_prior, LLL);
-        pair_print_custom(output,&pair);
+        if(unique(&pair)) improve_isize_est(iinfos, &pair, pe_opt->ap_prior, LLL);
+        if( ks ) pair_print_bam(ks,&pair);
+        else pair_print_custom(output,&pair);
         bam_destroy_pair(&pair);
     }
+    zmq_close( socket );
     fprintf(stderr, "[run_output_thread] finished cleanly, shutting down\n");
-    zmq_close(socket);
     return 0;
 }
 
@@ -1264,6 +1294,7 @@ void *run_worker_thread( void *arg )
     zmq_msg_t msg;
     bam_pair_t pair;
     int rc;
+    uint64_t n_tot[2], n_mapped[2] ;
     void *incoming = zmq_socket( zmq_context, ZMQ_PULL ) ;
     void *outgoing = zmq_socket( zmq_context, ZMQ_PUSH ) ;
     xassert(incoming, "error creating socket");
@@ -1287,9 +1318,9 @@ void *run_worker_thread( void *arg )
         switch( pair.phase ) {
             case pristine: pair_aln(&pair);     // first two steps can run together
             case aligned:  pair_posn(&pair);
-                           break ;              // but then we must send the result back
-            case positioned: fprintf( stderr, "[%s] not implemented!\n", __FUNCTION__ ) ; 
-                             exit(1) ;  // until we receive it again, then we finish it (once we know how to do that)
+                           break ;      // but then we must send the result back
+                                        // until we receive it again, then we finish it
+            case positioned: if( g_iinfos ) pair_finish(&pair, g_iinfos, n_tot, n_mapped) ;
             case finished: break ;              // boring...
         }
 
@@ -1316,9 +1347,15 @@ void *run_worker_thread( void *arg )
 //
 // FIXME: For the time being, the sliding window has a fixed size.
 //        Don't know yet how to make this more dynamic.
-void *run_io_multiplexor( void* arg )
+struct muxer_args {
+    void *workio[2] ;
+    enum pair_phase end_phase ;
+    const char *addr_in, *addr_out ;
+} ;
+
+void *run_io_multiplexor( void* vargs )
 {
-    void **workio = arg ;
+    struct muxer_args *args = vargs ;
     // Let's see... we're multiplexing between four sockets:
     // - input from BAM         (incoming_bam)
     // - output to BAM          (outgoing_bam)
@@ -1330,8 +1367,8 @@ void *run_io_multiplexor( void* arg )
     set_sockopts( incoming_bam ) ;
     set_sockopts( outgoing_bam ) ;
 
-    zcheck( zmq_connect( incoming_bam, "inproc://bam_in"  ), 1, "zmq_connect failed" );
-    zcheck( zmq_connect( outgoing_bam, "inproc://bam_out" ), 1, "zmq_connect failed" );
+    zcheck( zmq_connect( incoming_bam, args->addr_in ), 1, "zmq_connect failed" );
+    zcheck( zmq_connect( outgoing_bam, args->addr_out ), 1, "zmq_connect failed" );
 
     // We use an array as a ring buffer.  Three pointers point at
     // - the first free slot (index),
@@ -1358,9 +1395,9 @@ void *run_io_multiplexor( void* arg )
     // - We always poll for fan-in.
 
     zmq_pollitem_t polls[] = {
-        { socket : incoming_bam, fd : 0, events :  ZMQ_POLLIN, revents : 0 },
-        { socket :    workio[1], fd : 0, events :           0, revents : 0 },
-        { socket :    workio[0], fd : 0, events :  ZMQ_POLLIN, revents : 0 }
+        { socket :    incoming_bam, fd : 0, events :  ZMQ_POLLIN, revents : 0 },
+        { socket : args->workio[1], fd : 0, events :           0, revents : 0 },
+        { socket : args->workio[0], fd : 0, events :  ZMQ_POLLIN, revents : 0 }
     } ;
 
     while (!s_interrupted) {
@@ -1378,14 +1415,15 @@ void *run_io_multiplexor( void* arg )
         zterm( zmq_poll( polls, 3, -1 ), 1, "zmq_poll failed" ) break;
         if( s_interrupted ) break ;
 
-        // next time, do not poll for input
-        polls[0].events = 0 ;
-
         // If something is ready, what do we do?
         // - If fresh input arrives, send it to the network and put it in
         //   the ring buffer.  (If we did poll, the net was already
         //   guaranteed to be ready.)
         if( polls[0].revents & ZMQ_POLLIN) { // input available
+            // next time, do not poll for input (we change that later
+            // once we know we can handle more input)
+            polls[0].events = 0 ;
+
             // the buffer should not be full (otherwise it's a logic error)
             xassert( (next_free+1) % ring_size != next_expected % ring_size, "logic error in queueing thread (2)" ) ;
             if( loudness >= 3 ) fprintf( stderr, "got input record.\n" ) ;
@@ -1405,7 +1443,7 @@ void *run_io_multiplexor( void* arg )
                 exit(2);
             }
 
-            xassert( !ringbuf[next_free % ring_size].kind && ringbuf[next_free % ring_size].phase < positioned,
+            xassert( !ringbuf[next_free % ring_size].kind && ringbuf[next_free % ring_size].phase < args->end_phase,
                      "logic error in queueing thread (3)" ) ;
             pair_init_from_msg( &ringbuf[next_free % ring_size], &msg ) ;
             current_invalid-- ;
@@ -1416,7 +1454,7 @@ void *run_io_multiplexor( void* arg )
                 if( loudness >= 3 )
                     fprintf( stderr, "received recno %d (%d), will send.\n",
                              ringbuf[next_free % ring_size].recno, ringbuf[next_free % ring_size].kind ) ;
-                zterm( zmq_msg_send( &msg, workio[1], 0 ), 1, "zmq_send failed" ) break;
+                zterm( zmq_msg_send( &msg, args->workio[1], 0 ), 1, "zmq_send failed" ) break;
 
                 polls[1].events = ZMQ_POLLOUT ;
                 next_free++;
@@ -1450,10 +1488,10 @@ void *run_io_multiplexor( void* arg )
                             ringbuf[next_resend].recno, ringbuf[next_resend].kind ) ;
                     zmq_msg_t msg ;
                     msg_init_from_pair( &msg, &ringbuf[next_resend] ) ;
-                    zterm( zmq_msg_send( &msg, workio[1], 0 ), 1, "zmq_send failed" ) break;
+                    zterm( zmq_msg_send( &msg, args->workio[1], 0 ), 1, "zmq_send failed" ) break;
 
                     do next_resend = (next_resend+1) % ring_size ;
-                    while( ringbuf[next_resend].phase >= positioned || !ringbuf[next_resend].kind ) ;
+                    while( ringbuf[next_resend].phase >= args->end_phase || !ringbuf[next_resend].kind ) ;
                     total_resends++ ;
                 }
             }
@@ -1467,7 +1505,7 @@ void *run_io_multiplexor( void* arg )
             if( loudness >= 3 ) fprintf( stderr, "work done.\n" ) ;
             zmq_msg_t msg ;
             zmq_msg_init( &msg ) ;
-            zterm( zmq_msg_recv( &msg, workio[0], 0 ), 1, "zmq_recv failed" ) break;
+            zterm( zmq_msg_recv( &msg, args->workio[0], 0 ), 1, "zmq_recv failed" ) break;
             
             rn = *(int*)zmq_msg_data(&msg) ;
             if( loudness >= 3 ) fprintf( stderr, "[run_io_multiplexor] received record %d.\n", rn ) ;
@@ -1480,7 +1518,7 @@ void *run_io_multiplexor( void* arg )
                 if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this comes from the future: %d.\n", rn ) ;
                 zmq_msg_close(&msg ) ;
             }
-            else if( ringbuf[rn % ring_size].phase >= positioned ) {
+            else if( ringbuf[rn % ring_size].phase >= args->end_phase ) {
                 if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this is a duplicate: %d.\n", rn ) ;
                 total_dups++ ;
                 zmq_msg_close(&msg ) ;
@@ -1490,20 +1528,21 @@ void *run_io_multiplexor( void* arg )
                 bam_destroy_pair( &ringbuf[ rn % ring_size ] ) ;
                 pair_init_from_msg( &ringbuf[ rn % ring_size ], &msg ) ;
                 // I think this is implicit now:
-                xassert( ringbuf[ rn % ring_size ].phase >= positioned, "wrong phase marker" ) ;
                 xassert( ringbuf[ rn % ring_size ].kind, "wrong record type in queue" ) ;
                 zmq_msg_close(&msg ) ;
-                current_undone-- ;
-                current_done++ ;
+                if( ringbuf[ rn % ring_size ].phase >= args->end_phase ) {
+                    current_undone-- ;
+                    current_done++ ;
+                }
 
 received_one:
                 if( current_undone && next_resend == rn % ring_size ) 
                     do next_resend = (next_resend+1) % ring_size ;
-                    while( ringbuf[next_resend].phase >= positioned || !ringbuf[next_resend].kind ) ;
+                    while( ringbuf[next_resend].phase >= args->end_phase || !ringbuf[next_resend].kind ) ;
 
                 int foo = 0 ;
                 while( next_expected % ring_size != next_free % ring_size &&
-                        ringbuf[next_expected % ring_size].phase >= positioned )
+                        ringbuf[next_expected % ring_size].phase >= args->end_phase )
                 {
                     int mykind = ringbuf[next_expected % ring_size].kind ;
                     if( loudness >= 3 ) fprintf( stderr, "next expected: %d, next free: %d\n",
@@ -1536,7 +1575,7 @@ received_one:
 
                 if( current_undone ) {
                     int foo = 0 ;
-                    while( ringbuf[next_resend].phase >= positioned ) {
+                    while( ringbuf[next_resend].phase >= args->end_phase ) {
                         next_resend = (next_resend+1) % ring_size ;
                         xassert( foo++ < ring_size, "logic error in queueing thread (5)" ) ;
                     }
@@ -1549,14 +1588,10 @@ break2:
             total_out, total_resends, total_dups ) ;
     zmq_xclose( incoming_bam ) ;
     zmq_xclose( outgoing_bam ) ;
-    zmq_xclose( workio[0] ) ;
-    zmq_xclose( workio[1] ) ;
     free( ringbuf ) ;
     return 0 ;
 }
 
-// FIXME:  Don't know what to do about that weird trimming stuff.
-//
 // This is the driver loop for bam2bam.  Depending on setting, we run
 // different strategies:
 //
@@ -1568,8 +1603,10 @@ break2:
 //   threads, also bind to listening port.
 // - Worker mode: connect, run worker threads and two streamer devices.
 
-void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
+void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *output )
 {
+    struct muxer_args muxargs ;
+    void *broadcast ;
     khint_t iter;
     char *tmpname = alloca( strlen(tmpdir) + 11 ) ;
     strcpy( tmpname, tmpdir ) ;
@@ -1583,7 +1620,6 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
     khash_t(isize_infos) *iinfos = kh_init( isize_infos ) ;
     srand48(bns->seed);
 
-    // Can we get away with a simple loop?
     if( !gap_opt->n_threads && !listen_port ) {
         fprintf( stderr, "[bwa_bam2bam_core] No threads and no listening port specified, nothing to do.\n" ) ;
         exit(1);
@@ -1591,26 +1627,38 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
     
     int tmpfd1 = mkstemp( tmpname ) ;
     xassert( tmpfd1, "could not create temporary file" ) ;
+    fprintf( stderr, "[bwa_bam2bam_core] buffering data in %s\n", tmpname ) ;
     int tmpfd2 = dup(tmpfd1) ;
     xassert( tmpfd1, "could not duplicate file descriptor" ) ;
 
     gzFile tmpout = gzdopen( tmpfd1, "wb2" ) ;
     
+    // Can we get away with a simple loop?
     if( gap_opt->n_threads == 1 && !listen_port ) {
-        sequential_loop_pass1( tmpout, iinfos ) ;
+        sequential_loop_pass1( ks, tmpout, iinfos ) ;
+        gzclose( tmpout ) ;
+
+        infer_all_isizes( iinfos, pe_opt->ap_prior, LLL ) ;
+        g_iinfos = iinfos ;
+        off_t new_off = lseek(tmpfd2, 0, SEEK_SET) ;
+        xassert( new_off == 0, "failed to seek in temporary file" ) ;
+
+        gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
+        sequential_loop_pass2( tmpin, output, iinfos ) ;
+        gzclose( tmpin ) ;
+        unlink( tmpname ) ;
     } else {
-        void *workio[2] ;
         int n;
         pthread_t config_service_tid ;
-        pthread_t reader_tid ;
-        pthread_t mux_tid ;
+        pthread_t reader_tid, reader_tid2 ;
+        pthread_t mux_tid, mux_tid2 ;
 
         // Okay, we need 0MQ.
         s_catch_signals();
         zmq_context = zmq_init(1) ;
         xassert( zmq_context, "0MQ init failed" ) ;
 
-        void *broadcast = zmq_socket( zmq_context, ZMQ_PUB ) ;
+        broadcast = zmq_socket( zmq_context, ZMQ_PUB ) ;
         xassert(broadcast, "couldn't create socket");
 
         // Are we going to be network aware?  Then we need a
@@ -1624,21 +1672,21 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
             set_sockopts( broadcast ) ;
         }
 
-        workio[0] = zmq_socket( zmq_context, ZMQ_PULL ) ;
-        workio[1] = zmq_socket( zmq_context, ZMQ_PUSH ) ;
+        muxargs.workio[0] = zmq_socket( zmq_context, ZMQ_PULL ) ;
+        muxargs.workio[1] = zmq_socket( zmq_context, ZMQ_PUSH ) ;
         
-        set_sockopts(workio[1]);
-        set_sockopts(workio[0]);
+        set_sockopts(muxargs.workio[1]);
+        set_sockopts(muxargs.workio[0]);
 
-        zcheck( zmq_bind( workio[1], "inproc://work_out" ), 1, "zmq_bind failed" );
-        zcheck( zmq_bind( workio[0], "inproc://work_in" ), 1, "zmq_bind" );
+        zcheck( zmq_bind( muxargs.workio[1], "inproc://work_out" ), 1, "zmq_bind failed" );
+        zcheck( zmq_bind( muxargs.workio[0], "inproc://work_in" ), 1, "zmq_bind" );
         
         if( listen_port ) {
             char addr[100] ;
             snprintf( addr, 100, "tcp://*:%d", listen_port+1 ) ;
-            zcheck( zmq_bind( workio[1], addr ), 1, "zmq_bind failed" );
+            zcheck( zmq_bind( muxargs.workio[1], addr ), 1, "zmq_bind failed" );
             snprintf( addr, 100, "tcp://*:%d", listen_port+2 ) ;
-            zcheck( zmq_bind( workio[0], addr ), 1, "zmq_bind failed" );
+            zcheck( zmq_bind( muxargs.workio[0], addr ), 1, "zmq_bind failed" );
         }
 
         void *bam_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
@@ -1647,7 +1695,8 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
         zcheck( zmq_bind( bam_in, "inproc://bam_in" ), 1, "zmq_bind failed" );
 
         // Start reading in the background...
-        pthread_create( &reader_tid, 0, run_reader_thread, bam_in );
+        struct reader_thread_args rargs = { bam_in, ks, 0 } ;
+        pthread_create( &reader_tid, 0, run_reader_thread, &rargs );
         pthread_detach( reader_tid ) ;
 
         // Are threads requested?  Then fire them up.
@@ -1657,50 +1706,93 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, BGZF *output )
             pthread_detach(worker_tid);
         }
 
+        void *tmp_out = zmq_socket( zmq_context, ZMQ_PULL ) ;
+        xassert(tmp_out, "couldn't create socket");
+        set_sockopts(tmp_out);
+        zcheck( zmq_bind( tmp_out, "inproc://tmp_out" ), 1, "zmq_bind failed" );
+
+        // ...multiplex records between I/O and workers...
+        muxargs.end_phase = positioned ;
+        muxargs.addr_in = "inproc://bam_in" ;
+        muxargs.addr_out = "inproc://tmp_out" ;
+        pthread_create( &mux_tid, 0, run_io_multiplexor, &muxargs );
+        pthread_detach( mux_tid ) ;
+
+        // ...and shift to output in the foreground.
+        run_output_thread( 0, tmpout, tmp_out, iinfos );
+
+        // when we get here, we got the last record and an EOF marker,
+        // so round 1 is finished
+        gzclose( tmpout ) ;
+        infer_all_isizes( iinfos, pe_opt->ap_prior, LLL ) ;
+        g_iinfos = iinfos ;
+
+        // broadcast here iff we're networked.  doing it without the
+        // network would be no harm, but why do unnecessary work?
+        if( listen_port ) {
+            zmq_msg_t iinfo_msg ;
+            zmq_msg_init_size( &iinfo_msg, 1+iinfo_encoded_size(iinfos) ) ;
+            char *p = zmq_msg_data(&iinfo_msg) ; 
+            char *q = p + zmq_msg_size(&iinfo_msg) ;
+            *p = 2 ;
+            xassert( q == encode_iinfo( p+1, iinfos ), "failed encoding isize info" ) ;
+            fprintf( stderr, "[bwa_bam2bam_core] broadcasting insert size info\n" ) ;
+            zcheck( zmq_msg_send( &iinfo_msg, broadcast, 0 ), 1, "zmq_send failed" ) ;
+        }
+
+        off_t new_off = lseek(tmpfd2, 0, SEEK_SET) ;
+        xassert( new_off == 0, "failed to seek in temporary file" ) ;
+        gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
+
+        // At this point, all the workers and muxers are still connected
+        // and have been supplied with isize information.  The timing
+        // may screw this up, but if workers receive the isize info
+        // late, their work will simply be repeated.  All we need is
+        // another loop like the one above... but it should be
+        // parameterized, not cloned.
+
+        void *tmp_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
+        xassert(tmp_in, "couldn't create socket");
+        set_sockopts(tmp_in);
+        zcheck( zmq_bind( tmp_in, "inproc://tmp_in" ), 1, "zmq_bind failed" );
+
+        // Start reading in the background...
+        struct reader_thread_args rargs2 = { tmp_in, 0, tmpin } ;
+        pthread_create( &reader_tid2, 0, run_reader_thread, &rargs2 );
+        pthread_detach( reader_tid2 ) ;
+
         void *bam_out = zmq_socket( zmq_context, ZMQ_PULL ) ;
         xassert(bam_out, "couldn't create socket");
         set_sockopts(bam_out);
         zcheck( zmq_bind( bam_out, "inproc://bam_out" ), 1, "zmq_bind failed" );
 
         // ...multiplex records between I/O and workers...
-        pthread_create( &mux_tid, 0, run_io_multiplexor, workio );
-        pthread_detach( mux_tid ) ;
+        muxargs.end_phase = finished ;
+        muxargs.addr_in = "inproc://tmp_in" ;
+        muxargs.addr_out = "inproc://bam_out" ;
+        pthread_create( &mux_tid2, 0, run_io_multiplexor, &muxargs );
+        pthread_detach( mux_tid2 ) ;
 
-        // ...and shift to output in the foreground.
-        run_output_thread( tmpout, bam_out, iinfos );
-
-        // when we get here, we got the last record and an EOF marker,
-        // so we can safely tear down everything
+        run_output_thread( output, 0, bam_out, iinfos ) ;
+        gzclose( tmpin ) ;
+        unlink( tmpname ) ;
 
         // Done, tell everyone and get rid of 0MQ.
         zmq_msg_t finmsg ;
-        zmq_msg_init_data( &finmsg, "go away", 7, 0, 0 ) ;
+        zmq_msg_init_data( &finmsg, "\1go away", 8, 0, 0 ) ;
         fprintf( stderr, "[bwa_bam2bam_core] sending termination signal\n" ) ;
         zcheck( zmq_msg_send( &finmsg, broadcast, 0 ), 1, "zmq_send failed" ) ;
         fprintf( stderr, "[bwa_bam2bam_core] done, waiting for clean shutdown\n" ) ;
 
+        zmq_xclose( muxargs.workio[0] ) ;
+        zmq_xclose( muxargs.workio[1] ) ;
         zmq_xclose( broadcast ) ;
         zmq_term( zmq_context ) ;
     }
 
-    gzclose( tmpout ) ;
-    infer_all_isizes( iinfos, pe_opt->ap_prior, LLL ) ;
-    g_iinfos = iinfos ;
-    // broadcast here... iff we're networked
-
-    // XXX this only works if we loaded the index.  If called with "-t0"
-    // and a port number, we will blow up here.  Needs to be fixed soon.
-    off_t new_off = lseek(tmpfd2, 0, SEEK_SET) ;
-    xassert( new_off == 0, "failed to seek in temporary file" ) ;
-
-    gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
-    sequential_loop_pass2( tmpin, output, iinfos ) ;
-    gzclose( tmpin ) ;
-    unlink( tmpname ) ;
-
-	if (pac) bwt_destroy_pac(pac,bns);
-	if (ntbns) bns_destroy(ntbns);
-	if (bns) bns_destroy(bns);
+	if (pac)    bwt_destroy_pac(pac,bns);
+	if (ntbns)  bns_destroy(ntbns);
+	if (bns)    bns_destroy(bns);
 	if (bwt[0]) bwt_destroy(bwt[0]);
     if (bwt[1]) bwt_destroy(bwt[1]);
 
@@ -1829,7 +1921,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
 	}
 
     bam_header_t *hdr;
-	ks = bwa_bam_open(argv[optind], 7, saif, gap_opt, &hdr);
+	bwa_seqio_t *ks = bwa_bam_open(argv[optind], 7, saif, gap_opt, &hdr);
     bns = bns_restore(prefix);
 
     BGZF* output = ofile ? bgzf_open(ofile, "w2") : bgzf_fdopen(1, "w2") ;
@@ -1839,7 +1931,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
     }
     bam_header_destroy(hdr);
 
-    bwa_bam2bam_core(prefix, tmpname, output);
+    bwa_bam2bam_core(prefix, tmpname, ks, output);
 	bwa_seq_close(ks);
 
     bgzf_close( output );
@@ -1857,13 +1949,30 @@ void *run_device( void *args )
     return 0 ;
 }
 
+int handle_broadcast( zmq_msg_t *m, void* sock )
+{
+    zmq_msg_recv( m, sock, 0 );
+    if( zmq_msg_size(m) == 0 ) return 1 ;
+    if( *(char*)zmq_msg_data(m) == 1 ) return 0 ; // the termination code
+    if( *(char*)zmq_msg_data(m) == 2 ) {
+        // received isize info!!
+        fprintf( stderr, "[bwa_worker_core] Received broadcast of %d bytes of isize info.\n", (int)zmq_msg_size(m)-1 ) ;
+        char *p = zmq_msg_data(m)+1 ;
+        char *q = zmq_msg_data(m)+zmq_msg_size(m) ;
+        if( p != q ) {
+            if( g_iinfos ) kh_destroy(isize_infos, g_iinfos);
+            g_iinfos = decode_iinfo( p, q ) ;
+        }
+        return 1 ;
+    }
+    return -1 ; // Huh?
+}
+
 void bwa_worker_core( int nthreads, char* host, int port ) 
 {
     khiter_t iter ;
     time_t start_time = time(0) ;
     s_catch_signals();
-	// int tot_seqs=0; // cnt_chg=0;
-	// isize_info_t last_ii = {0} ;
 
     // Initialize genome index.  This is basically an mmap, but since
     // the data is read lazily, startup is slow afterwards.  Therefore,
@@ -1875,8 +1984,6 @@ void bwa_worker_core( int nthreads, char* host, int port )
     init_genome_index( prefix,1 ) ;
 
 	g_hash = kh_init(64);
-    // XXX ii.low = ii.high = 0; ii.avg = ii.std = -1.0;
-
     srand48(bns->seed);
 
     // Need a streamer that writes into work out and one that reads from
@@ -1931,20 +2038,22 @@ void bwa_worker_core( int nthreads, char* host, int port )
         npoll = zmq_poll( pitems, 2, 1E3 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
 
-        if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) break ;
+        if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) 
+            if( !handle_broadcast( &m, socks[4] ) ) break ;
         zterm( zmq_msg_recv( &m, socks[2], 0 ), 1, "zmq_recv failed" ) break;
 
         npoll = zmq_poll( pitems+1, 2, 1E3 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
 
-        if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) break ;
+        if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) 
+            if( !handle_broadcast( &m, socks[4] ) ) break ;
+
         zterm( zmq_msg_send( &m, socks[3], 0 ), 1, "zmq_send failed" ) break;
     }
 
     if( npoll==0 )
         fprintf( stderr, "[bwa_worker_core] No work delivered in %ds.  Terminating.\n", timeout ) ;
     else if( pitems[1].revents & ZMQ_POLLIN ) {
-        zmq_msg_recv( &m, socks[4], 0 );
         fprintf( stderr, "[bwa_worker_core] Received termination signal: \"%.*s\".\n",
                 (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
     } else if( s_interrupted ) 
@@ -2024,17 +2133,21 @@ int bwa_worker( int argc, char *argv[] )
     zcheck( zmq_msg_recv(&m, conf_sock, 0), 1, "zmq_recv failed" );
     zmq_xclose(conf_sock);
 
-    int plen = zmq_msg_size(&m) - sizeof(gap_opt_t) - sizeof(pe_opt_t) ;
-    zcheck( plen, 1, "received truncated configuration information" ) ;
-
 	gap_opt = gap_init_opt();
 	pe_opt = bwa_init_pe_opt();
-    prefix = malloc( 1+plen ) ;
 
     memcpy( gap_opt, zmq_msg_data(&m), sizeof(gap_opt_t) );
     memcpy( pe_opt, zmq_msg_data(&m) + sizeof(gap_opt_t), sizeof(pe_opt_t) );
-    memcpy( prefix, zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t), plen ) ;
-    prefix[plen] = 0 ;
+    prefix = strdup( zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t) ) ;
+
+    char *iinfo_start = zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix)+1 ;
+    char *iinfo_end   = zmq_msg_data(&m) + zmq_msg_size(&m) ;
+
+    if( iinfo_start != iinfo_end ) 
+    {
+        xassert( !g_iinfos, "got mysterious iinfo from nowhere" ) ;
+        g_iinfos = decode_iinfo( iinfo_start, iinfo_end ) ;
+    }
 
     zmq_msg_close(&m);
     bwa_worker_core( nthreads, host, port ) ;
