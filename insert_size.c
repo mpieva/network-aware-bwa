@@ -177,7 +177,7 @@ int iinfo_encoded_size( khash_t(isize_infos) *iinfos )
     int sz = 0 ;
     khiter_t k;
     for(k = kh_begin(iinfos); k != kh_end(iinfos); ++k)
-        if(kh_exist(iinfos,k) && kh_value(iinfos,k).hist )
+        if(kh_exist(iinfos,k))
             sz += strlen( kh_key(iinfos,k) ) + 1 + sizeof(isize_info_t) ;
     return sz ;
 }
@@ -186,7 +186,7 @@ char *encode_iinfo( char* p, khash_t(isize_infos) *iinfos )
 {
     khiter_t k;
     for(k = kh_begin(iinfos); k != kh_end(iinfos); ++k)
-        if(kh_exist(iinfos,k) && kh_value(iinfos,k).hist )
+        if(kh_exist(iinfos,k))
         {
             strcpy( p, kh_key(iinfos,k) ) ;
             p += strlen(kh_key(iinfos,k))+1 ;

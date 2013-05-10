@@ -1,23 +1,18 @@
-#define CHUNKSIZE 0x100000
-
-static const int loudness = 0;
-static const int ring_size = 0x280000;
-static const int timeout = 30;
-
-
 /* Combine aln, samse, sampe into one workflow.  We steal the workhorse
  * functions from the other subprograms, then wrap them in new top-level
  * functions.  Comes with a command line that combines all the other
  * options, maybe even some more.
  */
 
+static const int chunksize = 0x100000;
+static const int loudness = 0;
+static const int ring_size = 0x280000;
+static const int timeout = 30;
+
 // XXX we'd like to give duplicate reads the same coordinates that their
 //     representative got, assuming the latter is available.  That's a
 //     little hard to do right now; it needs to go into the bam writer
 //     thread and into sequential_loop_pass2.
-
-// XXX get this from bwt, even if the master doesn't load the whole bwt!
-#define LLL 3000000000ULL
 
 #include "bamlite.h"
 #include "bwtaln.h"
@@ -69,7 +64,8 @@ struct option longopts[] = {
     { "only-aligned",           0, 0, 128 },
     { "debug-bam",              0, 0, 129 },
     { "broken-input",           0, 0, 130 },
-    { "temp-dir",               1, 0, 131 },
+    { "skip-duplicates",        0, 0, 131 },
+    { "temp-dir",               1, 0, 132 },
     { "max-insert-size",        1, 0, 'a' },
     { "max-occurences",         1, 0, 'C' },
     { "max-occurences-se",      1, 0, 'D' },
@@ -97,6 +93,7 @@ static bwt_t     *bwt[2]      = {0,0};
 static bntseq_t  *bns         = 0;
 static bntseq_t  *ntbns       = 0;
 static ubyte_t   *pac         = 0;
+static bwtint_t genome_length = 0;
 
 static gap_opt_t *gap_opt     = 0;
 static pe_opt_t  *pe_opt      = 0;
@@ -105,6 +102,7 @@ static int       only_aligned = 0;
 static int       debug_bam    = 0;
 static int       broken_input = 0;
 static int       max_run_time = 90;
+static int    skip_duplicates = 0;
 
 static void      *zmq_context = 0;
 static int       listen_port  = 0;
@@ -599,11 +597,13 @@ void bwa_update_bam1(bam1_t *out, const bntseq_t *bns, bwa_seq_t *p, const bwa_s
 
 static int unique(bam_pair_t *p)
 {
-    switch (p->kind) {
-        case eof_marker:  return 0;
-        case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
-        case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
+    if( skip_duplicates ) {
+        switch (p->kind) {
+            case eof_marker:  return 0;
+            case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
+            case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
                               && !(p->bam_rec[1].core.flag & SAM_FDP) ;
+        }
     }
     return 1;
 }
@@ -707,9 +707,10 @@ static void posn_pair( bam_pair_t *raw )
 
 static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t n_tot[2], uint64_t n_mapped[2] )
 {
-    if( raw->phase == positioned && unique(raw) ) {
+    if( raw->phase != positioned ) return ;
+    if( unique(raw) ) {
         bwa_seq_t *p[2] = { raw->bwa_seq, raw->bwa_seq+1 } ;
-        pe_data_t d; // Is this copy even needed?!
+        pe_data_t d;
         int j;
 
         khiter_t it = kh_get(isize_infos, iinfos, bam_get_rg(raw->bam_rec)) ;
@@ -719,9 +720,7 @@ static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t
         for (j = 0; j < 2; ++j) 
         {
             if( !raw->bwa_seq[j].seq ) bam1_to_seq(&raw->bam_rec[j], &raw->bwa_seq[j], 1, gap_opt->trim_qual);
-            if(p[j]->n_aln > kv_max(d.aln[j]))
-                kv_resize(bwt_aln1_t, d.aln[j], p[j]->n_aln);
-            memcpy(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t));
+            d.aln[j].a = p[j]->aln;     // cheapting, but we do not really need to copy here
             d.aln[j].n = p[j]->n_aln; 
         }
 
@@ -791,18 +790,8 @@ static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t
             }
         }
 
-        { // XXX consistency check (copy into d is not needed if this doesn't fail!)
-            for (j = 0; j < 2; ++j) 
-            {
-                if( d.aln[j].n != p[j]->n_aln ||
-                        memcmp(d.aln[j].a, p[j]->aln, p[j]->n_aln*sizeof(bwt_aln1_t)) )
-                    fprintf( stderr, "oh shit\n" ) ;
-            }
-        }
-
         kv_destroy(d.arr);
         kv_destroy(d.pos[0]); kv_destroy(d.pos[1]);
-        kv_destroy(d.aln[0]); kv_destroy(d.aln[1]);
 
         // END from bwa_cal_pac_pos_pe
         bwa_paired_sw1(bns, pac, p, pe_opt, ii, n_tot, n_mapped);
@@ -818,9 +807,8 @@ static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t
         bwa_update_bam1( &raw->bam_rec[1], bns, &raw->bwa_seq[1], &raw->bwa_seq[0], gap_opt->mode, gap_opt->max_top2);
         bwa_free_read_seq1(&raw->bwa_seq[1]);
         bwa_free_read_seq1(&raw->bwa_seq[0]);
-        raw->phase = finished ;
     }
-    else if( raw->phase == positioned ) raw->phase = finished ;
+    raw->phase = finished ;
 }
 
 static inline double tdiff( struct timeval* tv1, struct timeval *tv2 )
@@ -851,7 +839,20 @@ void init_genome_index( const char* prefix, int touch )
     pac = bwt_restore_pac( bns,touch ) ;
     gettimeofday( &tv1, 0 ) ;
     fprintf(stderr, "%.2f sec\n", tdiff(&tv, &tv1));
+    genome_length = bwt[0]->seq_len ;
 }
+
+void init_genome_params( const char* prefix ) 
+{
+    bwtint_t foo[5] ;
+    char *fn = alloca(strlen(prefix) + 10);
+    strcpy(fn, prefix); strcat(fn, ".bwt");
+    FILE *fp = xopen(fn, "rb");
+	err_fread(foo, sizeof(bwtint_t), 5, fp);
+    genome_length = foo[4] ;
+    fclose(fp) ;
+}
+
 
 void pair_aln(bam_pair_t *p)
 {
@@ -923,7 +924,7 @@ void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
         switch( p->phase ) {
             case pristine: break ;
             case finished: break ;
-            case positioned: len += 37 + p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ;
+            case positioned: len += 38 + p->bwa_seq[i].n_multi * sizeof(bwt_multi1_t) ;
                              // fallthrough!
             case aligned: len += 8 + p->bwa_seq[i].n_aln * sizeof(bwt_aln1_t) ;
                           break ;
@@ -951,6 +952,7 @@ void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
                              *q++ = p->bwa_seq[i].n_gapo ;
                              *q++ = p->bwa_seq[i].n_gape ;
                              *q++ = p->bwa_seq[i].seQ ;
+                             *q++ = p->bwa_seq[i].mapQ ;
                              put_int( &q, p->bwa_seq[i].len ) ;
                              put_int( &q, p->bwa_seq[i].clip_len ) ;
                              put_int( &q, p->bwa_seq[i].score ) ;
@@ -1010,7 +1012,8 @@ void pair_init_from_msg(bam_pair_t *p, zmq_msg_t *m)
                              p->bwa_seq[i].n_mm   = *q++ ;
                              p->bwa_seq[i].n_gapo = *q++ ;
                              p->bwa_seq[i].n_gape = *q++ ;
-                             p->bwa_seq[i].seQ    = p->bwa_seq[i].mapQ = *q++ ;
+                             p->bwa_seq[i].seQ    = *q++ ;
+                             p->bwa_seq[i].mapQ   = *q++ ;
                              p->bwa_seq[i].len    = get_int( &q ) ;
                              p->bwa_seq[i].clip_len=get_int( &q ) ;
                              p->bwa_seq[i].score  = get_int( &q ) ;
@@ -1089,7 +1092,7 @@ void sequential_loop_pass1( bwa_seqio_t *ks, gzFile temporary, khash_t(isize_inf
         }
         pair_aln(&raw);
         pair_posn(&raw);
-        if(unique(&raw)) improve_isize_est(iinfos, &raw,pe_opt->ap_prior,LLL);
+        if(unique(&raw)) improve_isize_est(iinfos, &raw,pe_opt->ap_prior,genome_length);
 
         pair_print_custom(temporary,&raw);
         bam_destroy_pair(&raw);
@@ -1219,7 +1222,7 @@ void *run_reader_thread( void* vargs )
         }
 
         raw.recno = recno++; 
-        if(!(recno%CHUNKSIZE)) fprintf( stderr, "[run_reader_thread] %d records read so far.\n", recno );
+        if(!(recno%chunksize)) fprintf( stderr, "[run_reader_thread] %d records read so far.\n", recno );
         msg_init_from_pair( &msg, &raw );
         bam_destroy_pair(&raw);
         zterm( zmq_msg_send(&msg, args->socket, 0), 1, "zmq_send failed" ) break;
@@ -1269,7 +1272,7 @@ void *run_output_thread( BGZF *ks, gzFile output, void* socket, khash_t(isize_in
                 memmove( &tv0, &tv1, sizeof(struct timeval) ) ;
             }
         }
-        if(unique(&pair)) improve_isize_est(iinfos, &pair, pe_opt->ap_prior, LLL);
+        if(unique(&pair)) improve_isize_est(iinfos, &pair, pe_opt->ap_prior, genome_length);
         if( ks ) pair_print_bam(ks,&pair);
         else pair_print_custom(output,&pair);
         bam_destroy_pair(&pair);
@@ -1293,6 +1296,7 @@ void *run_worker_thread( void *arg )
 {
     zmq_msg_t msg;
     bam_pair_t pair;
+    int failure_count = 0 ;
     int rc;
     uint64_t n_tot[2], n_mapped[2] ;
     void *incoming = zmq_socket( zmq_context, ZMQ_PULL ) ;
@@ -1321,6 +1325,7 @@ void *run_worker_thread( void *arg )
                            break ;      // but then we must send the result back
                                         // until we receive it again, then we finish it
             case positioned: if( g_iinfos ) pair_finish(&pair, g_iinfos, n_tot, n_mapped) ;
+                             else ++failure_count ;    
             case finished: break ;              // boring...
         }
 
@@ -1329,6 +1334,11 @@ void *run_worker_thread( void *arg )
         rc = zmq_msg_send(&msg, outgoing, 0);
         zmq_msg_close(&msg);
         zterm( rc, 1, "zmq_msg_send failed" ) break;
+        if( failure_count >= 1024 ) {
+            fprintf( stderr, "[run_worker_thread] Lots of failures due to missing insert size information.\n" ) ;
+            fprintf( stderr, "[run_worker_thread] Terminating due to suspected communication problem.\n" ) ;
+            s_interrupted = 1 ;
+        }
     } while(pair.kind) ;
     fprintf( stderr, "[run_worker_thread] exiting.\n" ) ;
     zmq_close(outgoing);
@@ -1613,8 +1623,11 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
     strcat( tmpname, "/bwaXXXXXX" ) ;
 
     // Initialize genome index.  Needed if and only if we're going to
-    // have a worker thread.
+    // have a worker thread.  Else we still need a handful of numbers
+    // from the genome index.
     if( gap_opt->n_threads ) init_genome_index( prefix,1 ) ;
+    else init_genome_params( prefix ) ;
+    fprintf( stderr, "[bwa_bam2bam_core] genome length is %ld\n", (long)genome_length ) ;
 
 	g_hash = kh_init(64);
     khash_t(isize_infos) *iinfos = kh_init( isize_infos ) ;
@@ -1625,8 +1638,12 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         exit(1);
     } 
     
+    // Note: we unlink the file immediately.  It doesn't get deleted as
+    // long as we hold onto a file descriptor.  This way it doesn't
+    // linger if we crash and cannot delete it.
     int tmpfd1 = mkstemp( tmpname ) ;
     xassert( tmpfd1, "could not create temporary file" ) ;
+    unlink( tmpname ) ;
     fprintf( stderr, "[bwa_bam2bam_core] buffering data in %s\n", tmpname ) ;
     int tmpfd2 = dup(tmpfd1) ;
     xassert( tmpfd1, "could not duplicate file descriptor" ) ;
@@ -1638,7 +1655,7 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         sequential_loop_pass1( ks, tmpout, iinfos ) ;
         gzclose( tmpout ) ;
 
-        infer_all_isizes( iinfos, pe_opt->ap_prior, LLL ) ;
+        infer_all_isizes( iinfos, pe_opt->ap_prior, genome_length ) ;
         g_iinfos = iinfos ;
         off_t new_off = lseek(tmpfd2, 0, SEEK_SET) ;
         xassert( new_off == 0, "failed to seek in temporary file" ) ;
@@ -1646,7 +1663,6 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
         sequential_loop_pass2( tmpin, output, iinfos ) ;
         gzclose( tmpin ) ;
-        unlink( tmpname ) ;
     } else {
         int n;
         pthread_t config_service_tid ;
@@ -1724,7 +1740,7 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         // when we get here, we got the last record and an EOF marker,
         // so round 1 is finished
         gzclose( tmpout ) ;
-        infer_all_isizes( iinfos, pe_opt->ap_prior, LLL ) ;
+        infer_all_isizes( iinfos, pe_opt->ap_prior, genome_length ) ;
         g_iinfos = iinfos ;
 
         // broadcast here iff we're networked.  doing it without the
@@ -1736,7 +1752,7 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
             char *q = p + zmq_msg_size(&iinfo_msg) ;
             *p = 2 ;
             xassert( q == encode_iinfo( p+1, iinfos ), "failed encoding isize info" ) ;
-            fprintf( stderr, "[bwa_bam2bam_core] broadcasting insert size info\n" ) ;
+            fprintf( stderr, "[bwa_bam2bam_core] broadcasting %d bytes of insert size info\n", (int)zmq_msg_size(&iinfo_msg)-1 ) ;
             zcheck( zmq_msg_send( &iinfo_msg, broadcast, 0 ), 1, "zmq_send failed" ) ;
         }
 
@@ -1775,7 +1791,6 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
 
         run_output_thread( output, 0, bam_out, iinfos ) ;
         gzclose( tmpin ) ;
-        unlink( tmpname ) ;
 
         // Done, tell everyone and get rid of 0MQ.
         zmq_msg_t finmsg ;
@@ -1859,7 +1874,8 @@ int bwa_bam_to_bam( int argc, char *argv[] )
         case 128: only_aligned = 1; break;
         case 129: debug_bam = 1; break;
         case 130: broken_input = 1; break;
-        case 131: tmpname = *optarg ? optarg : "." ; break ;
+        case 131: skip_duplicates = 1; break;
+        case 132: tmpname = *optarg ? optarg : "." ; break ;
 		default: return 1;
 		}
 	}
@@ -1905,6 +1921,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
 		fprintf(stderr, "         -t, --num-threads INT             number of threads [%d]\n", gap_opt->n_threads);
         fprintf(stderr, "             --debug-bam                   add additional fields to BAM output to aid debugging\n");
         fprintf(stderr, "             --broken-input                ignore lone mates in input BAM (not recommended)\n");
+        fprintf(stderr, "             --skip-duplicates             do not bother mapping reads marked as duplicates\n");
 		fprintf(stderr, "         -0, -1, -2                        provide up to three sai files to resume from (not recommended)\n");
 		fprintf(stderr, "\n");
         if( !prefix ) 
