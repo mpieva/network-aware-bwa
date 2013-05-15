@@ -341,12 +341,11 @@ int try_get_sai( FILE **f, int c, int *naln, bwt_aln1_t **aln )
  * we got a pair, 0 if we reached EOF, -1 if something outside our
  * control went wrong, -2 if we got something unexpected (missing mate,
  * fragment with unexpected PE flags).
- * XXX  Right now, we don't know if reading the bam file went smoothly.
- *      The clean way to fix that is to use a completely different bam
- *      library (to be written).
  */
 static int read_bam_pair_core(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken)
 {
+    static int num_wrong_pair = 128 ;
+
     memset(pair, 0, sizeof(bam_pair_t)) ;
 	if (bam_read1(bs->fp, &pair->bam_rec[0]) < 0) return 0 ;
     while(1) {
@@ -378,8 +377,13 @@ static int read_bam_pair_core(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broke
                     // This is arguably wrong, we discard a lone mate.  But what else could we do?  Buffering it
                     // somewhere to wait is too hard for the time being, returning it as a single means we need to buffer the
                     // next one.  Not very appealing.  So only two options remain: discard it or bail out.
-                    fprintf( stderr, "[read_bam_pair] got two reads, but the names don't match (%s,%s).\n",
-                            bam1_qname(&pair->bam_rec[0]), bam1_qname(&pair->bam_rec[1]) ) ;
+                    if( num_wrong_pair ) {
+                        fprintf( stderr, "[read_bam_pair] got two reads, but the names don't match (%s,%s).\n",
+                                bam1_qname(&pair->bam_rec[0]), bam1_qname(&pair->bam_rec[1]) ) ;
+                        --num_wrong_pair ;
+                        if( !num_wrong_pair ) 
+                            fprintf( stderr, "[read_bam_pair] too many mismatched names, not reporting anymore.\n" ) ;
+                    }
                     try_get_sai( bs->sai, flag1 & BAM_FREAD1 ? 1 : 2, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) ;
                     free(pair->bam_rec[0].data);
                     if(pair->bwa_seq[0].n_aln) free(pair->bwa_seq[0].aln);

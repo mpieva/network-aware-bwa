@@ -5,14 +5,9 @@
  */
 
 static const int chunksize = 0x100000;
-static const int loudness = 0;
+static const int loudness  = 0;
 static const int ring_size = 0x280000;
-static const int timeout = 30;
-
-// XXX we'd like to give duplicate reads the same coordinates that their
-//     representative got, assuming the latter is available.  That's a
-//     little hard to do right now; it needs to go into the bam writer
-//     thread and into sequential_loop_pass2.
+static const int timeout   = 30;
 
 #include "bamlite.h"
 #include "bwtaln.h"
@@ -40,7 +35,6 @@ static const int the_hwm = 64;
 static const int the_linger = 2000;
 
 KHASH_MAP_INIT_INT64(64, poslist_t)
-static kh_64_t *g_hash;
 
 struct option longopts[] = {
     { "num-diff",               1, 0, 'n' },
@@ -602,7 +596,7 @@ static int unique(bam_pair_t *p)
             case eof_marker:  return 0;
             case singleton:   return !(p->bam_rec[0].core.flag & SAM_FDP) ;
             case proper_pair: return !(p->bam_rec[0].core.flag & SAM_FDP)
-                              && !(p->bam_rec[1].core.flag & SAM_FDP) ;
+                                  && !(p->bam_rec[1].core.flag & SAM_FDP) ;
         }
     }
     return 1;
@@ -705,7 +699,9 @@ static void posn_pair( bam_pair_t *raw )
     }
 }
 
-static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t n_tot[2], uint64_t n_mapped[2] )
+static void finish_pair(
+        bam_pair_t *raw, khash_t(isize_infos) *iinfos,
+        uint64_t n_tot[2], uint64_t n_mapped[2], kh_64_t *my_hash )
 {
     if( raw->phase != positioned ) return ;
     if( unique(raw) ) {
@@ -744,16 +740,16 @@ static void finish_pair( bam_pair_t *raw, khash_t(isize_infos) *iinfos, uint64_t
                         if (r->l - r->k + 1 >= MIN_HASH_WIDTH) { // then check hash table
                             uint64_t key = (uint64_t)r->k<<32 | r->l;
                             int ret;
-                            khint_t iter = kh_put(64, g_hash, key, &ret);
+                            khint_t iter = kh_put(64, my_hash, key, &ret);
                             if (ret) { // not in the hash table; ret must equal 1 as we never remove elements
-                                poslist_t *z = &kh_val(g_hash, iter);
+                                poslist_t *z = &kh_val(my_hash, iter);
                                 z->n = r->l - r->k + 1;
                                 z->a = (bwtint_t*)malloc(sizeof(bwtint_t) * z->n);
                                 for (l = r->k; l <= r->l; ++l)
                                     z->a[l - r->k] = r->a? bwt_sa(bwt[0], l) : bwt[1]->seq_len - (bwt_sa(bwt[1], l) + p[j]->len);
                             }
-                            for (l = 0; l < kh_val(g_hash, iter).n; ++l) {
-                                x = kh_val(g_hash, iter).a[l];
+                            for (l = 0; l < kh_val(my_hash, iter).n; ++l) {
+                                x = kh_val(my_hash, iter).a[l];
                                 x = x<<32 | k<<1 | j;
                                 kv_push(uint64_t, d.arr, x);
                             }
@@ -872,12 +868,14 @@ void pair_posn(bam_pair_t *p)
     }
 }
 
-void pair_finish(bam_pair_t *p, khash_t(isize_infos) *iinfos, uint64_t n_tot[2], uint64_t n_mapped[2] )
+void pair_finish(
+        bam_pair_t *p, khash_t(isize_infos) *iinfos,
+        uint64_t n_tot[2], uint64_t n_mapped[2], kh_64_t *my_hash )
 {
     switch (p->kind) {
         case eof_marker: break ;
         case singleton:   finish_singleton(p) ; break ;
-        case proper_pair: finish_pair(p,iinfos,n_tot,n_mapped) ; break ;
+        case proper_pair: finish_pair(p,iinfos,n_tot,n_mapped,my_hash) ; break ;
     }
 }
 
@@ -1110,6 +1108,9 @@ void sequential_loop_pass2( gzFile temporary, BGZF* output, khash_t(isize_infos)
     gettimeofday( &tv0, 0 ) ;
 
     int tot_seqs = 0, rc=0 ;
+    khiter_t iter ;
+    kh_64_t *my_hash ;
+	my_hash = kh_init(64);
     bam_pair_t raw ;
     for(;;) {
         rc=read_pair_custom(temporary, &raw);
@@ -1125,7 +1126,7 @@ void sequential_loop_pass2( gzFile temporary, BGZF* output, khash_t(isize_infos)
             fprintf(stderr, "[%s] %d sequences processed in %.2f sec\n",
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ));
         }
-        pair_finish(&raw, iinfos, n_tot, n_mapped);
+        pair_finish(&raw, iinfos, n_tot, n_mapped, my_hash);
         pair_print_bam(output,&raw);
         bam_destroy_pair(&raw);
     }
@@ -1137,6 +1138,10 @@ void sequential_loop_pass2( gzFile temporary, BGZF* output, khash_t(isize_infos)
                     __FUNCTION__, tot_seqs, tdiff( &tv0, &tv1 ), __FUNCTION__,
                     (long long)n_mapped[1], (long long)n_tot[1], SW_MIN_MAPQ,
                     (long long)n_mapped[0], (long long)n_tot[0], SW_MIN_MAPQ );
+	for (iter = kh_begin(my_hash); iter != kh_end(my_hash); ++iter)
+		if (kh_exist(my_hash, iter))
+            free(kh_val(my_hash, iter).a);
+	kh_destroy(64, my_hash);
 }
 
 void set_sockopts( void *socket )
@@ -1289,9 +1294,8 @@ void *run_output_thread( BGZF *ks, gzFile output, void* socket, khash_t(isize_in
 // other end is the I/O multiplexor, when running as worker process, the
 // other end is a streaming device.
 //
-// XXX Needs to be split into a lean-memory and a full version; needs to
-//     switch depending on whether ISIZE info is available; needs to
-//     switch on message type.
+// Could be split into a lean-memory and a full version, but that's
+// probably not worth the hassle when we're moving on to 0.7 anyway. 
 void *run_worker_thread( void *arg )
 {
     zmq_msg_t msg;
@@ -1299,6 +1303,10 @@ void *run_worker_thread( void *arg )
     int failure_count = 0 ;
     int rc;
     uint64_t n_tot[2], n_mapped[2] ;
+    kh_64_t *my_hash ;
+    khiter_t iter ;
+	my_hash = kh_init(64);
+
     void *incoming = zmq_socket( zmq_context, ZMQ_PULL ) ;
     void *outgoing = zmq_socket( zmq_context, ZMQ_PUSH ) ;
     xassert(incoming, "error creating socket");
@@ -1324,7 +1332,7 @@ void *run_worker_thread( void *arg )
             case aligned:  pair_posn(&pair);
                            break ;      // but then we must send the result back
                                         // until we receive it again, then we finish it
-            case positioned: if( g_iinfos ) pair_finish(&pair, g_iinfos, n_tot, n_mapped) ;
+            case positioned: if( g_iinfos ) pair_finish(&pair, g_iinfos, n_tot, n_mapped, my_hash) ;
                              else ++failure_count ;    
             case finished: break ;              // boring...
         }
@@ -1341,6 +1349,10 @@ void *run_worker_thread( void *arg )
         }
     } while(pair.kind) ;
     fprintf( stderr, "[run_worker_thread] exiting.\n" ) ;
+	for (iter = kh_begin(my_hash); iter != kh_end(my_hash); ++iter)
+		if (kh_exist(my_hash, iter))
+            free(kh_val(my_hash, iter).a);
+	kh_destroy(64, my_hash);
     zmq_close(outgoing);
     zmq_close(incoming);
     return 0;
@@ -1629,7 +1641,6 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
     else init_genome_params( prefix ) ;
     fprintf( stderr, "[bwa_bam2bam_core] genome length is %ld\n", (long)genome_length ) ;
 
-	g_hash = kh_init(64);
     khash_t(isize_infos) *iinfos = kh_init( isize_infos ) ;
     srand48(bns->seed);
 
@@ -1811,10 +1822,6 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
 	if (bwt[0]) bwt_destroy(bwt[0]);
     if (bwt[1]) bwt_destroy(bwt[1]);
 
-	for (iter = kh_begin(g_hash); iter != kh_end(g_hash); ++iter)
-		if (kh_exist(g_hash, iter))
-            free(kh_val(g_hash, iter).a);
-
 	for (iter = kh_begin(iinfos); iter != kh_end(iinfos); ++iter)
     {
         if (kh_exist(iinfos, iter)) {
@@ -1823,7 +1830,6 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         }
     }
     kh_destroy(isize_infos, iinfos);
-	kh_destroy(64, g_hash);
 }
 
 int bwa_bam_to_bam( int argc, char *argv[] )
@@ -1987,7 +1993,6 @@ int handle_broadcast( zmq_msg_t *m, void* sock )
 
 void bwa_worker_core( int nthreads, char* host, int port ) 
 {
-    khiter_t iter ;
     time_t start_time = time(0) ;
     s_catch_signals();
 
@@ -1999,8 +2004,6 @@ void bwa_worker_core( int nthreads, char* host, int port )
     // index is was even loaded.
     bns = bns_restore(prefix);
     init_genome_index( prefix,1 ) ;
-
-	g_hash = kh_init(64);
     srand48(bns->seed);
 
     // Need a streamer that writes into work out and one that reads from
@@ -2099,11 +2102,6 @@ void bwa_worker_core( int nthreads, char* host, int port )
     if (bns) bns_destroy(bns);
     if (bwt[0]) bwt_destroy(bwt[0]);
     if (bwt[1]) bwt_destroy(bwt[1]);
-
-    for (iter = kh_begin(g_hash); iter != kh_end(g_hash); ++iter)
-        if (kh_exist(g_hash, iter))
-            free(kh_val(g_hash, iter).a);
-    kh_destroy(64, g_hash);
 }
 
 int bwa_worker( int argc, char *argv[] )
