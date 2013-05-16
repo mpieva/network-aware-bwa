@@ -1649,12 +1649,8 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         exit(1);
     } 
     
-    // Note: we unlink the file immediately.  It doesn't get deleted as
-    // long as we hold onto a file descriptor.  This way it doesn't
-    // linger if we crash and cannot delete it.
     int tmpfd1 = mkstemp( tmpname ) ;
     xassert( tmpfd1, "could not create temporary file" ) ;
-    unlink( tmpname ) ;
     fprintf( stderr, "[bwa_bam2bam_core] buffering data in %s\n", tmpname ) ;
     int tmpfd2 = dup(tmpfd1) ;
     xassert( tmpfd1, "could not duplicate file descriptor" ) ;
@@ -1816,6 +1812,7 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         zmq_term( zmq_context ) ;
     }
 
+    unlink( tmpname ) ;
 	if (pac)    bwt_destroy_pac(pac,bns);
 	if (ntbns)  bns_destroy(ntbns);
 	if (bns)    bns_destroy(bns);

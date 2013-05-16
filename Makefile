@@ -31,10 +31,10 @@ prefix=		/usr/local
 all:$(PROG)
 
 install: all
-	install -d         $(prefix)/bin
-	install -m 775 bwa $(prefix)/bin/
-	install -d           $(prefix)/share/man/man1
-	install -m 644 bwa.1 $(prefix)/share/man/man1/
+	install -d            $(prefix)/bin
+	install -m 775 bwa -b $(prefix)/bin/
+	install -d              $(prefix)/share/man/man1
+	install -m 644 bwa.1 -b $(prefix)/share/man/man1/
 
 lib-recur all-recur clean-recur cleanlocal-recur install-recur:
 		@target=`echo $@ | sed s/-recur//`; \
