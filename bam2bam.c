@@ -1773,57 +1773,60 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         // when we get here, we got the last record and an EOF marker,
         // so round 1 is finished
         gzclose( tmpout ) ;
-        infer_all_isizes( iinfos, pe_opt->ap_prior, genome_length ) ;
-        g_iinfos = iinfos ;
 
-        // broadcast here iff we're networked.  doing it without the
-        // network would be no harm, but why do unnecessary work?
-        if( listen_port ) {
-            zmq_msg_t iinfo_msg ;
-            zmq_msg_init_size( &iinfo_msg, 1+iinfo_encoded_size(iinfos) ) ;
-            char *p = zmq_msg_data(&iinfo_msg) ; 
-            char *q = p + zmq_msg_size(&iinfo_msg) ;
-            *p = 2 ;
-            xassert( q == encode_iinfo( p+1, iinfos ), "failed encoding isize info" ) ;
-            fprintf( stderr, "[bwa_bam2bam_core] broadcasting %d bytes of insert size info\n", (int)zmq_msg_size(&iinfo_msg)-1 ) ;
-            zcheck( zmq_msg_send( &iinfo_msg, broadcast, 0 ), 1, "zmq_send failed" ) ;
+        if( !s_interrupted ) {
+            infer_all_isizes( iinfos, pe_opt->ap_prior, genome_length ) ;
+            g_iinfos = iinfos ;
+
+            // broadcast here iff we're networked.  doing it without the
+            // network would be no harm, but why do unnecessary work?
+            if( listen_port ) {
+                zmq_msg_t iinfo_msg ;
+                zmq_msg_init_size( &iinfo_msg, 1+iinfo_encoded_size(iinfos) ) ;
+                char *p = zmq_msg_data(&iinfo_msg) ; 
+                char *q = p + zmq_msg_size(&iinfo_msg) ;
+                *p = 2 ;
+                xassert( q == encode_iinfo( p+1, iinfos ), "failed encoding isize info" ) ;
+                fprintf( stderr, "[bwa_bam2bam_core] broadcasting %d bytes of insert size info\n", (int)zmq_msg_size(&iinfo_msg)-1 ) ;
+                zcheck( zmq_msg_send( &iinfo_msg, broadcast, 0 ), 1, "zmq_send failed" ) ;
+            }
+
+            off_t new_off = lseek(tmpfd2, 0, SEEK_SET) ;
+            xassert( new_off == 0, "failed to seek in temporary file" ) ;
+            gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
+
+            // At this point, all the workers and muxers are still connected
+            // and have been supplied with isize information.  The timing
+            // may screw this up, but if workers receive the isize info
+            // late, their work will simply be repeated.  All we need is
+            // another loop like the one above... but it should be
+            // parameterized, not cloned.
+
+            void *tmp_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
+            xassert(tmp_in, "couldn't create socket");
+            set_sockopts(tmp_in);
+            zcheck( zmq_bind( tmp_in, "inproc://tmp_in" ), 1, "zmq_bind failed" );
+
+            // Start reading in the background...
+            struct reader_thread_args rargs2 = { tmp_in, 0, tmpin } ;
+            pthread_create( &reader_tid2, 0, run_reader_thread, &rargs2 );
+            pthread_detach( reader_tid2 ) ;
+
+            void *bam_out = zmq_socket( zmq_context, ZMQ_PULL ) ;
+            xassert(bam_out, "couldn't create socket");
+            set_sockopts(bam_out);
+            zcheck( zmq_bind( bam_out, "inproc://bam_out" ), 1, "zmq_bind failed" );
+
+            // ...multiplex records between I/O and workers...
+            muxargs.end_phase = finished ;
+            muxargs.addr_in = "inproc://tmp_in" ;
+            muxargs.addr_out = "inproc://bam_out" ;
+            pthread_create( &mux_tid2, 0, run_io_multiplexor, &muxargs );
+            pthread_detach( mux_tid2 ) ;
+
+            run_output_thread( output, 0, bam_out, iinfos ) ;
+            gzclose( tmpin ) ;
         }
-
-        off_t new_off = lseek(tmpfd2, 0, SEEK_SET) ;
-        xassert( new_off == 0, "failed to seek in temporary file" ) ;
-        gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
-
-        // At this point, all the workers and muxers are still connected
-        // and have been supplied with isize information.  The timing
-        // may screw this up, but if workers receive the isize info
-        // late, their work will simply be repeated.  All we need is
-        // another loop like the one above... but it should be
-        // parameterized, not cloned.
-
-        void *tmp_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
-        xassert(tmp_in, "couldn't create socket");
-        set_sockopts(tmp_in);
-        zcheck( zmq_bind( tmp_in, "inproc://tmp_in" ), 1, "zmq_bind failed" );
-
-        // Start reading in the background...
-        struct reader_thread_args rargs2 = { tmp_in, 0, tmpin } ;
-        pthread_create( &reader_tid2, 0, run_reader_thread, &rargs2 );
-        pthread_detach( reader_tid2 ) ;
-
-        void *bam_out = zmq_socket( zmq_context, ZMQ_PULL ) ;
-        xassert(bam_out, "couldn't create socket");
-        set_sockopts(bam_out);
-        zcheck( zmq_bind( bam_out, "inproc://bam_out" ), 1, "zmq_bind failed" );
-
-        // ...multiplex records between I/O and workers...
-        muxargs.end_phase = finished ;
-        muxargs.addr_in = "inproc://tmp_in" ;
-        muxargs.addr_out = "inproc://bam_out" ;
-        pthread_create( &mux_tid2, 0, run_io_multiplexor, &muxargs );
-        pthread_detach( mux_tid2 ) ;
-
-        run_output_thread( output, 0, bam_out, iinfos ) ;
-        gzclose( tmpin ) ;
 
         // Done, tell everyone and get rid of 0MQ.
         zmq_msg_t finmsg ;
