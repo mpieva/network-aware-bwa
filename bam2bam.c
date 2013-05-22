@@ -812,6 +812,32 @@ static inline double tdiff( struct timeval* tv1, struct timeval *tv2 )
     return (double)(tv2->tv_sec-tv1->tv_sec) + 0.000001 * (double)(tv2->tv_usec-tv1->tv_usec) ;
 }
 
+/* XXX  This is creating difficulties in a cluster environment.
+ *
+ * We want the genome index to live in shared memory, in case the
+ * cluster scheduler starts up more than one instance on a single node.
+ * So we need mmap().  We also want to have the genome index on a
+ * network file system, to avoid silly duplication.
+ *
+ * The genome index on NFS already causes substantial traffic, combined
+ * with mmap() it seems to get a lot worse.  The way out could be a
+ * "shared memory object", which is filled explicitly and then mmapped,
+ * maybe combined with a multicast protocol for distribution.  But then
+ * we need to dispose of the shared memory object after some timeout.
+ *
+ * So, here's the clean idea:  Operate on a named shared memory object
+ * ("index") and two named semaphores ("ready", "alive").  To initialize
+ * the genome index, grab "ready", mmap "index" and put back "ready".
+ * At regular intervals, put "alive", when done, unmap "index" (but do
+ * not unlink anything).
+ *
+ * If the three don't exist, create them, and fork a process to
+ * initialize them, then proceed as above.  The child loads the genome
+ * index, then puts "ready".  It then does a timed wait on "alive".  If
+ * it runs into a timeout, it unlinks everything and exits.
+ *
+ * To be implemented when I feel like it.
+ */
 void init_genome_index( const char* prefix, int touch )
 {
     struct timeval tv, tv1 ;
