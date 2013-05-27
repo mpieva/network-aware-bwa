@@ -1,8 +1,9 @@
 CC=		gcc
 CXX=		g++
 # CFLAGS=		-ggdb -O0 -Wall -DUSE_MMAP
-CFLAGS=		-ggdb -O2 -Wall -DUSE_MMAP
-# CFLAGS=		-ggdb -O2 -Wall
+# CFLAGS=		-ggdb -O2 -Wall -DUSE_MMAP
+CFLAGS=		-ggdb -O2 -Wall
+# CFLAGS=		-ggdb -O0 -Wall
 CFLAGS+=	`pkg-config --cflags libzmq`
 # CFLAGS+=    `pkg-config --cflags libczmq`
 CXXFLAGS=	$(CFLAGS)
@@ -31,10 +32,10 @@ prefix=		/usr/local
 all:$(PROG)
 
 install: all
-	install -d            $(prefix)/bin
-	install -m 775 bwa -b $(prefix)/bin/
-	install -d              $(prefix)/share/man/man1
-	install -m 644 bwa.1 -b $(prefix)/share/man/man1/
+	install -d         $(prefix)/bin
+	install -m 775 bwa $(prefix)/bin/
+	install -d           $(prefix)/share/man/man1
+	install -m 644 bwa.1 $(prefix)/share/man/man1/
 
 lib-recur all-recur clean-recur cleanlocal-recur install-recur:
 		@target=`echo $@ | sed s/-recur//`; \

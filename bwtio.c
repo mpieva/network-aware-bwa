@@ -144,9 +144,10 @@ void bwt_destroy(bwt_t *bwt)
 
 #else
 
-ubyte_t *bwt_restore_pac( const bntseq_t *bns )
+ubyte_t *bwt_restore_pac( const bntseq_t *bns, int dummy )
 {
     ubyte_t *pac = (ubyte_t*)malloc(bns->l_pac/4+1);
+    xassert(pac, "failed to allocate space for pac file");
     rewind(bns->fp_pac);
     err_fread(pac, 1, bns->l_pac/4+1, bns->fp_pac);
     return pac;
@@ -157,7 +158,7 @@ void bwt_destroy_pac( ubyte_t *pac, const bntseq_t *bns )
     free(pac) ;
 }
 
-void bwt_restore_sa(const char *fn, bwt_t *bwt)
+void bwt_restore_sa(const char *fn, bwt_t *bwt, int dummy)
 {
 	char skipped[256];
 	FILE *fp;
@@ -172,14 +173,15 @@ void bwt_restore_sa(const char *fn, bwt_t *bwt)
 	xassert(primary == bwt->seq_len, "SA-BWT inconsistency: seq_len is not the same.");
 
 	bwt->n_sa = (bwt->seq_len + bwt->sa_intv) / bwt->sa_intv;
-	bwt->sa = (bwtint_t*)calloc(bwt->n_sa, sizeof(bwtint_t));
+	bwt->sa = (bwtint_t*)malloc(bwt->n_sa * sizeof(bwtint_t));
+    xassert(bwt->sa, "failed to allocate space for sa file");
 	/* bwt->sa[0] = -1; */
 
 	err_fread(bwt->sa + 1, sizeof(bwtint_t), bwt->n_sa - 1, fp);
 	fclose(fp);
 }
 
-bwt_t *bwt_restore_bwt(const char *fn)
+bwt_t *bwt_restore_bwt(const char *fn, int dummy)
 {
 	bwt_t *bwt;
 	FILE *fp;
@@ -188,7 +190,8 @@ bwt_t *bwt_restore_bwt(const char *fn)
 	fp = xopen(fn, "rb");
 	fseek(fp, 0, SEEK_END);
 	bwt->bwt_size = (ftell(fp) - sizeof(bwtint_t) * 5) >> 2;
-	bwt->bwt = (uint32_t*)calloc(bwt->bwt_size, 4);
+	bwt->bwt = (uint32_t*)malloc(bwt->bwt_size * 4);
+    xassert(bwt->bwt, "failed to allocate space for bwt file");
 	fseek(fp, 0, SEEK_SET);
 	err_fread(&bwt->primary, sizeof(bwtint_t), 1, fp);
 	err_fread(bwt->L2+1, sizeof(bwtint_t), 4, fp);

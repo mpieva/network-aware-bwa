@@ -24,6 +24,7 @@ static const int timeout   = 30;
 #include <getopt.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 
 #include <zmq.h>
 #include <pthread.h>
@@ -91,7 +92,6 @@ static bwtint_t genome_length = 0;
 
 static gap_opt_t *gap_opt     = 0;
 static pe_opt_t  *pe_opt      = 0;
-static char      *prefix      = 0;
 static int       only_aligned = 0;
 static int       debug_bam    = 0;
 static int       broken_input = 0;
@@ -942,7 +942,7 @@ inline void put_block( unsigned char **p, void *q, size_t s )
 void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
 {
     // recno, kind, phase, 0-2 bam_recs w/ data_len
-    int rc, i, len = 4 + 1 + 1 ;
+    int rc, i, len = 6 ;
     for( i = 0 ; i != p->kind ; ++i ) {
         len += sizeof( bam1_core_t ) + 4 + p->bam_rec[i].data_len ;
         switch( p->phase ) {
@@ -1056,7 +1056,19 @@ void pair_init_from_msg(bam_pair_t *p, zmq_msg_t *m)
                              break ;
         }
     }
-    xassert( q == (unsigned char*)zmq_msg_data(m) + zmq_msg_size(m), "error decoding message" ) ;
+    if( q != (unsigned char*)zmq_msg_data(m) + zmq_msg_size(m) ) {
+        int i ;
+        q = (unsigned char*)zmq_msg_data(m) ;
+        fprintf( stderr, "error decoding message: %d bytes, phase %d, kind %d, recno %d, hexdump follows",
+                (int)zmq_msg_size(m), p->phase, p->kind, p->recno ) ;
+        for( i = 0 ; i != zmq_msg_size(m) ; ++i )
+        {
+            if( !(i & 31) ) fputc( '\n', stderr ) ;
+            fprintf( stderr, " %02x", (int)(q[i]) ) ;
+        }
+        fputc( '\n', stderr ) ;
+        exit(1) ;
+    }
 }
 
 void pair_print_custom( gzFile f, bam_pair_t *p )
@@ -1064,28 +1076,39 @@ void pair_print_custom( gzFile f, bam_pair_t *p )
     zmq_msg_t m ;
     msg_init_from_pair( &m, p ) ;
     uint32_t len = zmq_msg_size( &m ) ;
-    gzwrite( f, &len, sizeof(len) ) ;
-    gzwrite( f, zmq_msg_data( &m ), len ) ;
+    int r, l1 = gzwrite( f, &len, sizeof(len) ) ;
+    int l2 = gzwrite( f, zmq_msg_data( &m ), len ) ;
+    if( l1 != sizeof(len) || l2 != len ) {
+        fprintf(stderr, "[%s] error writing temporary file (%s,%s)\n",
+                __FUNCTION__, gzerror(f,&r), strerror(errno) ) ;
+        exit(1);
+    }
     zmq_msg_close(&m) ;
 }
 
 int read_pair_custom( gzFile f, bam_pair_t *p )
 {
     uint32_t len ;
+    int r ;
     if( sizeof(len) == gzread( f, &len, sizeof(len) ) ) 
     {
         zmq_msg_t m ;
         zmq_msg_init_size( &m, len ) ;
-        gzread( f, zmq_msg_data(&m), len ) ;
+        int l1 = gzread( f, zmq_msg_data(&m), len ) ;
+        if( l1 != len ) goto hell ;
         pair_init_from_msg(p, &m);
         zmq_msg_close(&m);
         return p->kind;
     }
-    else
+    else if( gzeof(f) )
     {
         memset(p, 0, sizeof(bam_pair_t)) ;
         return 0;
     }
+hell:
+    fprintf(stderr, "[%s] error reading temporary file (%s,%s)\n",
+            __FUNCTION__, gzerror(f,&r), strerror(errno) ) ;
+    exit(1);
 }
 
 // This is the simple sequential loop:  We run it if exactly one thread
@@ -1187,7 +1210,7 @@ void zmq_xclose( void *socket )
 }
 
 
-void *run_config_service( void *arg )
+void *run_config_service( void *prefix )
 {
     char buf[100] ;
     void *socket = zmq_socket( zmq_context, ZMQ_REP ) ;
@@ -1202,25 +1225,37 @@ void *run_config_service( void *arg )
         zmq_msg_init(&m) ;
 
         zterm( zmq_msg_recv(&m, socket, 0), 1, "zmq_recv failed" ) break;
-        
-        fprintf( stderr, "[run_config_service] Received hello: %.*s.\n", 
-                (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
-        zmq_msg_close(&m) ;
+        if( zmq_msg_size(&m) > 0 ) {
+            char key = *(char*)zmq_msg_data(&m) ;
+            if( key == 0 ) {
+                zmq_msg_t m2 ;
+                fprintf( stderr, "[run_config_service] Received hello: %.*s.\n", 
+                        (int)zmq_msg_size(&m)-1, (char*)zmq_msg_data(&m)+1 ) ;
 
-        zmq_msg_init_size(&m, sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix) + 1
-                + (g_iinfos ? iinfo_encoded_size(g_iinfos) : 0) ) ;
-        memcpy(zmq_msg_data(&m),                                       gap_opt, sizeof(gap_opt_t));
-        memcpy(zmq_msg_data(&m) + sizeof(gap_opt_t),                    pe_opt, sizeof(pe_opt_t));
-        strcpy(zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t), prefix );
-        if( g_iinfos )
-        {
-            char *q = encode_iinfo( zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix)+1, g_iinfos ) ;
-            xassert( q == zmq_msg_data(&m) + zmq_msg_size(&m), "encoding of config failed" ) ;
+                zmq_msg_init_size(&m2, sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix)) ;
+                memcpy(zmq_msg_data(&m2),                                       gap_opt, sizeof(gap_opt_t));
+                memcpy(zmq_msg_data(&m2) + sizeof(gap_opt_t),                    pe_opt, sizeof(pe_opt_t));
+                memcpy(zmq_msg_data(&m2) + sizeof(gap_opt_t) + sizeof(pe_opt_t), prefix, strlen(prefix) );
+                zterm( zmq_msg_send(&m2, socket, 0), 1, "zmq_send failed" ) break;
+                zmq_msg_close(&m2) ;
+            }
+            else if( key == 1 ) {
+                zmq_msg_t m2 ;
+                fprintf( stderr, "[run_config_service] Received update request: %.*s.\n", 
+                        (int)zmq_msg_size(&m)-1, (char*)zmq_msg_data(&m)+1 ) ;
+
+                zmq_msg_init_size(&m2, g_iinfos ? iinfo_encoded_size(g_iinfos) : 0 ) ;
+                if( g_iinfos ) {
+                    char *q = encode_iinfo( zmq_msg_data(&m2), g_iinfos ) ;
+                    xassert( q == zmq_msg_data(&m2) + zmq_msg_size(&m2), "encoding of config failed" ) ;
+                }
+                zterm( zmq_msg_send(&m2, socket, 0), 1, "zmq_send failed" ) break;
+                zmq_msg_close(&m2) ;
+            }
+
         }
-        zterm( zmq_msg_send(&m, socket, 0), 1, "zmq_send failed" ) break;
         zmq_msg_close(&m) ;
     }
-
     zmq_xclose( socket ) ;
     return 0;
 }
@@ -1399,6 +1434,7 @@ struct muxer_args {
     void *workio[2] ;
     enum pair_phase end_phase ;
     const char *addr_in, *addr_out ;
+    int cleanup ;
 } ;
 
 void *run_io_multiplexor( void* vargs )
@@ -1460,7 +1496,8 @@ void *run_io_multiplexor( void* vargs )
         if( loudness >= 3 )
             fprintf( stderr, "next expected: %d, next free: %d\n", next_expected % ring_size, next_free % ring_size ) ; 
 
-        zterm( zmq_poll( polls, 3, -1 ), 1, "zmq_poll failed" ) break;
+        // OMFG, this is becoming unmaintainable quickly...
+        zterm( zmq_poll( incoming_bam ? polls : polls+1, incoming_bam ? 3 : 2, -1 ), 1, "zmq_poll failed" ) break;
         if( s_interrupted ) break ;
 
         // If something is ready, what do we do?
@@ -1515,7 +1552,8 @@ void *run_io_multiplexor( void* vargs )
                 xassert( incoming_bam, "repeated closing of incoming_bam" ) ;
                 zmq_close( incoming_bam ) ;
                 incoming_bam = 0 ;
-                polls[0].socket = 0 ;
+                polls[0].events = 0 ;
+                polls[0].revents = 0 ;
                 current_done++ ;
                 next_free++;
                 zmq_msg_close(&msg) ;
@@ -1606,7 +1644,7 @@ received_one:
                     // ringbuf[next_expected % ring_size].phase = pristine ;
 
                     // this should be dispatched based on message phase
-                    zterm( zmq_msg_send( &msg, outgoing_bam, 0 ), 1, "zmq_send failed" ) goto break2;
+                    zterm( zmq_msg_send( &msg, outgoing_bam, 0 ), 1, "zmq_send failed" ) goto forced_exit ;
                     zmq_msg_close(&msg) ;
                     total_out+=mykind;
                     current_done--;
@@ -1615,7 +1653,7 @@ received_one:
                     // How to shut down?
                     // - If EOF is ready to be sent out, shut everything
                     //   down and send the EOF.
-                    if( !mykind ) goto break2 ;
+                    if( !mykind ) { if( args->cleanup ) goto forced_exit ; else goto clean_exit ; }
                     next_expected++ ;
                     if( loudness >= 4 ) fprintf( stderr, "spinning(1)\n" ) ;
                     xassert( foo++ < ring_size, "logic error in queueing thread (4)" ) ;
@@ -1631,11 +1669,16 @@ received_one:
             }
         }
     }
-break2:
+    
+forced_exit:
+    zmq_xclose( args->workio[0] ) ;
+    zmq_xclose( args->workio[1] ) ;
+
+clean_exit:
     fprintf( stderr, "[run_io_multiplexor] finished: %d records in total, %d resends, %d dups.\n",
             total_out, total_resends, total_dups ) ;
-    zmq_xclose( incoming_bam ) ;
-    zmq_xclose( outgoing_bam ) ;
+    if( incoming_bam ) zmq_close( incoming_bam ) ;
+    zmq_close( outgoing_bam ) ;
     free( ringbuf ) ;
     return 0 ;
 }
@@ -1686,7 +1729,10 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
     // Can we get away with a simple loop?
     if( gap_opt->n_threads == 1 && !listen_port ) {
         sequential_loop_pass1( ks, tmpout, iinfos ) ;
-        gzclose( tmpout ) ;
+        if( gzclose( tmpout ) != Z_OK ) {
+            fprintf( stderr, "[%s] error closing temporary file (%s)", __FUNCTION__, strerror(errno) ) ;
+            exit(1) ;
+        }
 
         infer_all_isizes( iinfos, pe_opt->ap_prior, genome_length ) ;
         g_iinfos = iinfos ;
@@ -1695,7 +1741,10 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
 
         gzFile tmpin = gzdopen( tmpfd2, "rb" ) ;
         sequential_loop_pass2( tmpin, output, iinfos ) ;
-        gzclose( tmpin ) ;
+        if( gzclose( tmpin ) != Z_OK ) {
+            fprintf( stderr, "[%s] error closing temporary file (%s)", __FUNCTION__, strerror(errno) ) ;
+            exit(1) ;
+        }
     } else {
         int n;
         pthread_t config_service_tid ;
@@ -1714,7 +1763,7 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         // configuration service.  And a broadcast channel.
         if( listen_port ) {
             char addr[100] ;
-            pthread_create( &config_service_tid, 0, run_config_service, 0 ) ;
+            pthread_create( &config_service_tid, 0, run_config_service, (void*)prefix ) ;
             pthread_detach( config_service_tid ) ;
             snprintf( addr, 100, "tcp://*:%d", listen_port+3 ) ;
             zcheck( zmq_bind( broadcast, addr ), 1, "zmq_bind failed" );
@@ -1764,6 +1813,7 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         muxargs.end_phase = positioned ;
         muxargs.addr_in = "inproc://bam_in" ;
         muxargs.addr_out = "inproc://tmp_out" ;
+        muxargs.cleanup = 0 ;
         pthread_create( &mux_tid, 0, run_io_multiplexor, &muxargs );
         pthread_detach( mux_tid ) ;
 
@@ -1772,7 +1822,11 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
 
         // when we get here, we got the last record and an EOF marker,
         // so round 1 is finished
-        gzclose( tmpout ) ;
+        if( gzclose( tmpout ) != Z_OK ) {
+            fprintf( stderr, "[%s] error closing temporary file (%s)", __FUNCTION__, strerror(errno) ) ;
+            exit(1) ;
+        }
+        close( tmpfd1 ) ;
 
         if( !s_interrupted ) {
             infer_all_isizes( iinfos, pe_opt->ap_prior, genome_length ) ;
@@ -1821,11 +1875,16 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
             muxargs.end_phase = finished ;
             muxargs.addr_in = "inproc://tmp_in" ;
             muxargs.addr_out = "inproc://bam_out" ;
+            muxargs.cleanup = 1 ;
             pthread_create( &mux_tid2, 0, run_io_multiplexor, &muxargs );
             pthread_detach( mux_tid2 ) ;
 
             run_output_thread( output, 0, bam_out, iinfos ) ;
-            gzclose( tmpin ) ;
+            if( gzclose( tmpin ) != Z_OK ) {
+                fprintf( stderr, "[%s] error closing temporary file (%s)", __FUNCTION__, strerror(errno) ) ;
+                exit(1) ;
+            }
+            close( tmpfd2 ) ;
         }
 
         // Done, tell everyone and get rid of 0MQ.
@@ -1835,8 +1894,6 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
         zcheck( zmq_msg_send( &finmsg, broadcast, 0 ), 1, "zmq_send failed" ) ;
         fprintf( stderr, "[bwa_bam2bam_core] done, waiting for clean shutdown\n" ) ;
 
-        zmq_xclose( muxargs.workio[0] ) ;
-        zmq_xclose( muxargs.workio[1] ) ;
         zmq_xclose( broadcast ) ;
         zmq_term( zmq_context ) ;
     }
@@ -1864,6 +1921,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
     char *saif[3] = {0,0,0} ;
     char *ofile = 0;
     char *tmpname = "/var/tmp" ;
+    char *prefix = 0;
 
 	gap_opt = gap_init_opt();
 	pe_opt = bwa_init_pe_opt();
@@ -1954,6 +2012,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
         fprintf(stderr, "             --debug-bam                   add additional fields to BAM output to aid debugging\n");
         fprintf(stderr, "             --broken-input                ignore lone mates in input BAM (not recommended)\n");
         fprintf(stderr, "             --skip-duplicates             do not bother mapping reads marked as duplicates\n");
+        fprintf(stderr, "             --temp-dir                    location of intermediate file [%s]\n", tmpname);
 		fprintf(stderr, "         -0, -1, -2                        provide up to three sai files to resume from (not recommended)\n");
 		fprintf(stderr, "\n");
         if( !prefix ) 
@@ -2001,6 +2060,7 @@ void *run_device( void *args )
 int handle_broadcast( zmq_msg_t *m, void* sock )
 {
     zmq_msg_recv( m, sock, 0 );
+    fprintf( stderr, "[bwa_worker_core] Received broadcast of %d bytes.\n", (int)zmq_msg_size(m) ) ;
     if( zmq_msg_size(m) == 0 ) return 1 ;
     if( *(char*)zmq_msg_data(m) == 1 ) return 0 ; // the termination code
     if( *(char*)zmq_msg_data(m) == 2 ) {
@@ -2021,16 +2081,6 @@ void bwa_worker_core( int nthreads, char* host, int port )
 {
     time_t start_time = time(0) ;
     s_catch_signals();
-
-    // Initialize genome index.  This is basically an mmap, but since
-    // the data is read lazily, startup is slow afterwards.  Therefore,
-    // we touch all of the index (by looping over the data structures
-    // and reading a word every so often), and *then* open the streaming
-    // sockets.  Otherwise we risk running into a timeout before the
-    // index is was even loaded.
-    bns = bns_restore(prefix);
-    init_genome_index( prefix,1 ) ;
-    srand48(bns->seed);
 
     // Need a streamer that writes into work out and one that reads from
     // work_in.  (Those would mimic the role of the multiplexor.)
@@ -2078,21 +2128,24 @@ void bwa_worker_core( int nthreads, char* host, int port )
         { socks[3], 0, ZMQ_POLLOUT, 0 } } ;
 
     int npoll=0;
-    zmq_msg_t m ;
+    zmq_msg_t m, m2 ;
     zmq_msg_init(&m) ;
+    zmq_msg_init(&m2) ;
     while (!s_interrupted && time(0) - start_time < max_run_time*60) {
         npoll = zmq_poll( pitems, 2, 1E3 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
 
-        if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) 
-            if( !handle_broadcast( &m, socks[4] ) ) break ;
+        if( npoll == 0 ) break ;
+        if( pitems[1].revents & ZMQ_POLLIN ) 
+            if( !handle_broadcast( &m2, socks[4] ) ) break ;
         zterm( zmq_msg_recv( &m, socks[2], 0 ), 1, "zmq_recv failed" ) break;
 
         npoll = zmq_poll( pitems+1, 2, 1E3 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
 
-        if( npoll == 0 || (pitems[1].revents & ZMQ_POLLIN) ) 
-            if( !handle_broadcast( &m, socks[4] ) ) break ;
+        if( npoll == 0 ) break ;
+        if( pitems[1].revents & ZMQ_POLLIN ) 
+            if( !handle_broadcast( &m2, socks[4] ) ) break ;
 
         zterm( zmq_msg_send( &m, socks[3], 0 ), 1, "zmq_send failed" ) break;
     }
@@ -2101,7 +2154,7 @@ void bwa_worker_core( int nthreads, char* host, int port )
         fprintf( stderr, "[bwa_worker_core] No work delivered in %ds.  Terminating.\n", timeout ) ;
     else if( pitems[1].revents & ZMQ_POLLIN ) {
         fprintf( stderr, "[bwa_worker_core] Received termination signal: \"%.*s\".\n",
-                (int)zmq_msg_size(&m), (char*)zmq_msg_data(&m) ) ;
+                (int)zmq_msg_size(&m2)-1, (char*)zmq_msg_data(&m2)+1 ) ;
     } else if( s_interrupted ) 
         fprintf( stderr, "[bwa_worker_core] Received interrupt signal.\n" ) ;
     else 
@@ -2109,6 +2162,7 @@ void bwa_worker_core( int nthreads, char* host, int port )
                 (int)(time(0) - start_time) / 60 ) ;
 
     zmq_msg_close(&m);
+    zmq_msg_close(&m2);
 
     pthread_cancel( fan_out ) ;
     pthread_join( fan_out, 0 ) ;
@@ -2134,6 +2188,7 @@ int bwa_worker( int argc, char *argv[] )
 {
     int c, nthreads = 1, port = 0 ;
     char *host = "localhost" ;
+    char *prefix = 0;
 
 	while ((c = getopt_long(argc, argv, "t:h:p:T:", workeropts, 0)) >= 0) {
 		switch (c) {
@@ -2165,23 +2220,46 @@ int bwa_worker( int argc, char *argv[] )
     snprintf( addr, 100, "tcp://%s:%d", host, port ) ;
     zcheck( zmq_connect( conf_sock, addr ), 1, "zmq_connect failed" );
 
+    struct utsname un ;
+    uname( &un ) ;
+
     zmq_msg_t m;
-    zmq_msg_init_size(&m,20);
-    gethostname( zmq_msg_data(&m), 20 ) ;
+    zmq_msg_init_size(&m,strlen(un.nodename)+1);
+    *(char*)zmq_msg_data(&m) = 0 ;
+    memcpy( (char*)zmq_msg_data(&m)+1, un.nodename, strlen(un.nodename) ) ;
     zcheck( zmq_msg_send(&m, conf_sock, 0), 1, "zmq_send failed" );
-    zmq_msg_close(&m);
-    zmq_msg_init(&m);
+    // zmq_msg_close(&m);
+    // zmq_msg_init(&m);
     zcheck( zmq_msg_recv(&m, conf_sock, 0), 1, "zmq_recv failed" );
-    zmq_xclose(conf_sock);
 
 	gap_opt = gap_init_opt();
 	pe_opt = bwa_init_pe_opt();
 
     memcpy( gap_opt, zmq_msg_data(&m), sizeof(gap_opt_t) );
     memcpy( pe_opt, zmq_msg_data(&m) + sizeof(gap_opt_t), sizeof(pe_opt_t) );
-    prefix = strdup( zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t) ) ;
+    prefix = strndup( zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t),
+                      zmq_msg_size(&m) - sizeof(gap_opt_t) - sizeof(pe_opt_t) ) ;
+    zmq_msg_close(&m);
 
-    char *iinfo_start = zmq_msg_data(&m) + sizeof(gap_opt_t) + sizeof(pe_opt_t) + strlen(prefix)+1 ;
+    // Initialize genome index.  This is basically an mmap, but since
+    // the data is read lazily, startup is slow afterwards.  Therefore,
+    // we touch all of the index (by looping over the data structures
+    // and reading a word every so often), and *then* open the streaming
+    // sockets.  Otherwise we risk running into a timeout before the
+    // index is was even loaded.
+    bns = bns_restore(prefix);
+    init_genome_index( prefix,1 ) ;
+    srand48(bns->seed);
+
+    zmq_msg_init_size(&m,strlen(un.nodename)+1);
+    *(char*)zmq_msg_data(&m) = 1 ;
+    memcpy( (char*)zmq_msg_data(&m)+1, un.nodename, strlen(un.nodename) ) ;
+    zcheck( zmq_msg_send(&m, conf_sock, 0), 1, "zmq_send failed" );
+    // zmq_msg_close(&m);
+    // zmq_msg_init(&m);
+    zcheck( zmq_msg_recv(&m, conf_sock, 0), 1, "zmq_recv failed" );
+    zmq_xclose(conf_sock);
+    char *iinfo_start = zmq_msg_data(&m) ;
     char *iinfo_end   = zmq_msg_data(&m) + zmq_msg_size(&m) ;
 
     if( iinfo_start != iinfo_end ) 
