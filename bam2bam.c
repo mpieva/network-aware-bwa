@@ -6,8 +6,8 @@
 
 static const int chunksize = 0x100000;
 static const int loudness  = 0;
-static const int ring_size = 0x280000;
-static const int timeout   = 30;
+static const int ring_size = 0x80000;
+static const int timeout   = 90;
 
 #include "bamlite.h"
 #include "bwtaln.h"
@@ -1344,7 +1344,8 @@ void *run_output_thread( BGZF *ks, gzFile output, void* socket, khash_t(isize_in
         bam_destroy_pair(&pair);
     }
     zmq_close( socket );
-    fprintf(stderr, "[run_output_thread] finished cleanly, shutting down\n");
+    fprintf(stderr, "[run_output_thread] %s, shutting down\n",
+            s_interrupted ? "interrupted" : "finished cleanly" );
     return 0;
 }
 
@@ -1431,7 +1432,7 @@ void *run_worker_thread( void *arg )
 // FIXME: For the time being, the sliding window has a fixed size.
 //        Don't know yet how to make this more dynamic.
 struct muxer_args {
-    void *workio[2] ;
+    void *from_crowd, *to_crowd ;
     enum pair_phase end_phase ;
     const char *addr_in, *addr_out ;
     int cleanup ;
@@ -1454,70 +1455,180 @@ void *run_io_multiplexor( void* vargs )
     zcheck( zmq_connect( incoming_bam, args->addr_in ), 1, "zmq_connect failed" );
     zcheck( zmq_connect( outgoing_bam, args->addr_out ), 1, "zmq_connect failed" );
 
-    // We use an array as a ring buffer.  Three pointers point at
-    // - the first free slot (index),
-    // - the next record to be sent on if it is done (recno!)
-    // - the next record to be resent if necessary (index).
-
-    // The ring buffer is empty if (next_free == next_expected), full if
-    // (next_free == next_expected-1).
-
+    // We use an array as a ring buffer.
+    // - next_free: the first free slot
+    // - next_undone: the first record not yet processed
+    // - next_output: the first record to send downstream
+    //
+    // This divides the ring buffer into three areas:  free area (from
+    // next_free to next_output), mixed done and undone (from
+    // next_undone to next_free), completely done (from next_output to
+    // next_undone). 
+    //
+    // Also tracked:
+    // - next_resend: the next record to resend, which travels over the
+    //   mixed area repeatedly.
+    // - next_send: next record to be sent
+    
     bam_pair_t *ringbuf = calloc( ring_size, sizeof(bam_pair_t) );
-    int next_free = 0, next_expected = 0, next_resend = 0 ;
+    int next_free = 0, next_undone = 0, next_send = 0, next_resend = 0, next_output = 0 ;
     int total_out = 0, total_resends = 0, total_in = 0, total_dups = 0 ;
-    int current_undone = 0, current_done = 0, current_invalid = ring_size ;
-    int rn ;
+    int current_undone = 0, current_done = 0, current_free = ring_size ;
+    int recs_out = 0, recs_in = 0, rn ;
     struct timeval tv0, tv1;
     gettimeofday( &tv0, 0 ); tv0.tv_sec -= 5;
 
-    // When do we poll what?
-    // - Output is not polled, we send when we're ready and block if
-    //   necessary.
-    // - We poll input if the network is ready, our queue is not full
-    //   and input has not ended yet.
-    // - We always poll for fan-out.
-    // - We always poll for fan-in.
-
     zmq_pollitem_t polls[] = {
-        { socket :    incoming_bam, fd : 0, events :  ZMQ_POLLIN, revents : 0 },
-        { socket : args->workio[1], fd : 0, events :           0, revents : 0 },
-        { socket : args->workio[0], fd : 0, events :  ZMQ_POLLIN, revents : 0 }
+        { socket :     outgoing_bam, fd : 0, events : 0, revents : 0 },
+        { socket :   args->to_crowd, fd : 0, events : 0, revents : 0 },
+        { socket : args->from_crowd, fd : 0, events : 0, revents : 0 },
+        { socket :     incoming_bam, fd : 0, events : 0, revents : 0 }
     } ;
 
     while (!s_interrupted) {
-        xassert( current_done + current_undone + current_invalid == ring_size, "logic error in queueing thread (1)" ) ;
+        xassert( current_done + current_undone + current_free == ring_size, "accounting in logic thread is broken" ) ;
+        xassert( next_output - next_free + ring_size == current_free, "management of free space is broken" ) ;
+        xassert( next_free - next_output == current_done + current_undone, "management of mixed space is broken" ) ;
+            
         gettimeofday( &tv1, 0 ) ;
         if( loudness >= 2 || tdiff(&tv0,&tv1) >= 10 ) {
-            fprintf( stderr, "[run_io_multiplexor] polling -- %d records received, "
-                             "%d written, %d resends; %d done in queue, %d undone in queue.\n",
-                     total_in, total_out, total_resends, current_done, current_undone ) ;
+            fprintf( stderr, "[run_io_multiplexor] polling -- %d (%d) records received, "
+                             "%d (%d) written, %d resends; %d done, %d in flight.\n",
+                     total_in, recs_in, total_out, recs_out, total_resends, current_done, current_undone ) ;
             memmove( &tv0, &tv1, sizeof(struct timeval) );
         }
         if( loudness >= 3 )
-            fprintf( stderr, "next expected: %d, next free: %d\n", next_expected % ring_size, next_free % ring_size ) ; 
+            fprintf( stderr, "next undone: %d, next free: %d, next output: %d\n", next_undone, next_free, next_output ) ; 
 
-        // OMFG, this is becoming unmaintainable quickly...
-        zterm( zmq_poll( incoming_bam ? polls : polls+1, incoming_bam ? 3 : 2, -1 ), 1, "zmq_poll failed" ) break;
+        // outgoing: poll for ZMQ_POLLOUT if something is done
+        polls[0].events = next_output % ring_size != next_undone % ring_size ? ZMQ_POLLOUT : 0 ;
+
+        // to_crowd: poll for ZMQ_POLLOUT if something isn't done yet
+        polls[1].events = current_undone ? ZMQ_POLLOUT : 0 ;
+
+        // from_crowd: always, and maybe only to throw it away
+        polls[2].events = ZMQ_POLLIN ;
+
+        // incoming: iff we have room and still expect input
+        polls[3].events = incoming_bam && current_free ? ZMQ_POLLIN : 0 ;
+
+        zterm( zmq_poll( polls, incoming_bam ? 4 : 3, -1 ), 1, "zmq_poll failed" ) break;
         if( s_interrupted ) break ;
 
-        // If something is ready, what do we do?
-        // - If fresh input arrives, send it to the network and put it in
-        //   the ring buffer.  (If we did poll, the net was already
-        //   guaranteed to be ready.)
-        if( polls[0].revents & ZMQ_POLLIN) { // input available
-            // next time, do not poll for input (we change that later
-            // once we know we can handle more input)
-            polls[0].events = 0 ;
+        // can send output downstream, so send one record
+        if(polls[0].revents & ZMQ_POLLOUT) {
+            int mykind = ringbuf[next_output % ring_size].kind ;
+            if( loudness >= 3 ) fprintf( stderr, "next output: %d, next free: %d\n",
+                    next_output, next_free ) ;
 
-            // the buffer should not be full (otherwise it's a logic error)
-            xassert( (next_free+1) % ring_size != next_expected % ring_size, "logic error in queueing thread (2)" ) ;
+            // make message from pair, then invalidate the slot
+            // so it doesn't get sent again.
+            zmq_msg_t msg ;
+            msg_init_from_pair( &msg, &ringbuf[next_output % ring_size] ) ;
+            bam_destroy_pair( &ringbuf[next_output % ring_size] ) ;
+            ringbuf[next_output % ring_size].kind = 0 ; 
+            ringbuf[next_output % ring_size].phase = pristine ; 
+
+            // this should be dispatched based on message phase?
+            zterm( zmq_msg_send( &msg, outgoing_bam, 0 ), 1, "zmq_send failed" ) goto forced_exit ;
+            zmq_msg_close(&msg) ;
+            total_out ++ ;
+            recs_out += mykind;
+            current_done--;
+            current_free++;
+            next_output++ ;
+
+            // How to shut down?
+            // - If EOF is ready to be sent out, shut everything
+            //   down and send the EOF.
+            if( !mykind ) { if( args->cleanup ) goto forced_exit ; else goto clean_exit ; }
+        }
+
+        // Ready to send to the crowd.  We send an unacknowledged packet.
+        if(polls[1].revents & ZMQ_POLLOUT) {
+            xassert( current_undone, "Why did I ask the crowd for volunteers again?" ) ;
+            if( loudness >= 3 ) fprintf( stderr, "ready to send, will send recno %d (%d).\n",
+                    ringbuf[next_resend % ring_size].recno, ringbuf[next_resend % ring_size].kind ) ;
+            zmq_msg_t msg ;
+            if( next_send != next_free ) {
+                msg_init_from_pair( &msg, &ringbuf[next_send % ring_size] ) ;
+                next_send++ ;
+            }
+            else {
+                msg_init_from_pair( &msg, &ringbuf[next_resend % ring_size] ) ;
+                total_resends++ ;
+
+                do {
+                    next_resend++ ;
+                    if( next_resend % ring_size == next_free % ring_size )
+                        next_resend = next_undone ;
+                }
+                while( ringbuf[next_resend % ring_size].phase >= args->end_phase
+                        || !ringbuf[next_resend % ring_size].kind ) ;
+            }
+
+            zterm( zmq_msg_send( &msg, args->to_crowd, 0 ), 1, "zmq_send failed" ) break;
+            zmq_msg_close( &msg ) ;
+        }
+
+        // Something came back from the crowd.  Make sure we actually
+        // want it, then store it.
+        if(polls[2].revents & ZMQ_POLLIN) {
+            if( loudness >= 3 ) fprintf( stderr, "work done.\n" ) ;
+            zmq_msg_t msg ;
+            zmq_msg_init( &msg ) ;
+            zterm( zmq_msg_recv( &msg, args->from_crowd, 0 ), 1, "zmq_recv failed" ) break;
+            
+            rn = *(int*)zmq_msg_data(&msg) ;
+            if( loudness >= 3 ) fprintf( stderr, "[run_io_multiplexor] received record %d.\n", rn ) ;
+            if( rn < next_undone ) {
+                if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this is old shit: %d.\n", rn ) ;
+                total_dups++ ;
+            }
+            else if( rn >= next_free ) {
+                if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this comes from the future: %d.\n", rn ) ;
+                total_dups++ ;
+            }
+            else if( ringbuf[rn % ring_size].phase >= args->end_phase ) {
+                if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this is a duplicate: %d.\n", rn ) ;
+                total_dups++ ;
+            }
+            else {
+                if( loudness >= 3 ) fprintf( stderr, "this is not a duplicate, dealing with it\n" ) ;
+                bam_destroy_pair( &ringbuf[ rn % ring_size ] ) ;
+                pair_init_from_msg( &ringbuf[ rn % ring_size ], &msg ) ;
+                xassert( ringbuf[ rn % ring_size ].kind, "wrong record type in queue" ) ;
+
+                if( ringbuf[ rn % ring_size ].phase >= args->end_phase ) {
+                    while( ringbuf[next_undone % ring_size].phase >= args->end_phase )
+                        next_undone++ ;
+
+                    current_undone-- ;
+                    current_done++ ;
+                }
+
+                if( current_undone && next_resend == rn ) {
+                    do {
+                        next_resend++ ;
+                        if( next_resend == next_free )
+                            next_resend = next_undone ;
+                    }
+                    while( ringbuf[next_resend % ring_size].phase >= args->end_phase
+                            || !ringbuf[next_resend % ring_size].kind ) ;
+                }
+            }
+            zmq_msg_close(&msg ) ;
+        }
+
+        // Input is available.  Store it, and also mark it as the next
+        // thing to send.
+        if( polls[3].revents & ZMQ_POLLIN) {
             if( loudness >= 3 ) fprintf( stderr, "got input record.\n" ) ;
             zmq_msg_t msg ;
             zmq_msg_init( &msg ) ;
             zterm( zmq_msg_recv( &msg, incoming_bam, 0 ), 1, "zmq_recv failed" ) break;
 
-            // input comes ordered, so the correct slot should be
-            // (next_free)
+            // input comes ordered, so the correct slot should be (next_free)
             rn = *(int*)zmq_msg_data(&msg) ;
             if( next_free != rn )
             {
@@ -1531,152 +1642,40 @@ void *run_io_multiplexor( void* vargs )
             xassert( !ringbuf[next_free % ring_size].kind && ringbuf[next_free % ring_size].phase < args->end_phase,
                      "logic error in queueing thread (3)" ) ;
             pair_init_from_msg( &ringbuf[next_free % ring_size], &msg ) ;
-            current_invalid-- ;
+            current_free-- ;
             if( ringbuf[next_free % ring_size].kind ) {
-                total_in += ringbuf[next_free % ring_size].kind ;
-                if( !current_undone ) next_resend = next_free % ring_size;
+                total_in++ ;
+                recs_in += ringbuf[next_free % ring_size].kind ;
                 current_undone++ ;
                 if( loudness >= 3 )
-                    fprintf( stderr, "received recno %d (%d), will send.\n",
-                             ringbuf[next_free % ring_size].recno, ringbuf[next_free % ring_size].kind ) ;
-                zterm( zmq_msg_send( &msg, args->workio[1], 0 ), 1, "zmq_send failed" ) break;
-
-                polls[1].events = ZMQ_POLLOUT ;
-                next_free++;
-                zmq_msg_close(&msg) ;
+                    fprintf( stderr, "received recno %d (%d), will send %d next.\n",
+                             ringbuf[next_free % ring_size].recno,
+                             ringbuf[next_free % ring_size].kind,
+                             ringbuf[next_send % ring_size].recno ) ;
             } else {
-                // How to shut down?
-                // - If EOF arrives from input, we shut down input and enqueue the
-                //   EOF marker (as already acknowledged).
+                // Shutdown logic:
+                // If EOF arrives from input, we shut down input and
+                // enqueue the EOF marker (marked as already finished).
                 ringbuf[next_free % ring_size].phase = finished ;
                 xassert( incoming_bam, "repeated closing of incoming_bam" ) ;
                 zmq_close( incoming_bam ) ;
                 incoming_bam = 0 ;
-                polls[0].events = 0 ;
-                polls[0].revents = 0 ;
+                polls[3].events = 0 ;
+                polls[3].revents = 0 ;
                 current_done++ ;
-                next_free++;
-                zmq_msg_close(&msg) ;
-                goto received_one ;
             }
-        }
-
-        // - If the fan-out is ready and the queue is full, resend an
-        //   unacknowledged packet.
-        // - If we're out of input, resend an unacknowledged packet.  We
-        //   will be sending out packets rapidly, duplicating some work,
-        //   but we never get stuck this way.  We must make sure not to
-        //   resend if the queue is full of finished stuff.
-        if(polls[1].revents & ZMQ_POLLOUT) { // network ready
-            if( (next_free+1) % ring_size == next_expected % ring_size || !incoming_bam ) {
-                if( current_undone ) {
-                    if( loudness >= 3 ) fprintf( stderr, "ready to send, will send recno %d (%d).\n",
-                            ringbuf[next_resend].recno, ringbuf[next_resend].kind ) ;
-                    zmq_msg_t msg ;
-                    msg_init_from_pair( &msg, &ringbuf[next_resend] ) ;
-                    zterm( zmq_msg_send( &msg, args->workio[1], 0 ), 1, "zmq_send failed" ) break;
-
-                    do next_resend = (next_resend+1) % ring_size ;
-                    while( ringbuf[next_resend].phase >= args->end_phase || !ringbuf[next_resend].kind ) ;
-                    total_resends++ ;
-                }
-            }
-            // next time, poll for input
-            else polls[0].events = ZMQ_POLLIN ;
-        }
-
-        // - If fan-in arrives, put it in the queue.  If the next packet to
-        //   be sent out arrived, start sending what is ready.
-        if(polls[2].revents & ZMQ_POLLIN) { // work done
-            if( loudness >= 3 ) fprintf( stderr, "work done.\n" ) ;
-            zmq_msg_t msg ;
-            zmq_msg_init( &msg ) ;
-            zterm( zmq_msg_recv( &msg, args->workio[0], 0 ), 1, "zmq_recv failed" ) break;
-            
-            rn = *(int*)zmq_msg_data(&msg) ;
-            if( loudness >= 3 ) fprintf( stderr, "[run_io_multiplexor] received record %d.\n", rn ) ;
-            if( rn < next_expected ) {
-                if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this is old shit: %d.\n", rn ) ;
-                total_dups++ ;
-                zmq_msg_close(&msg ) ;
-            }
-            else if( rn >= next_free ) {
-                if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this comes from the future: %d.\n", rn ) ;
-                zmq_msg_close(&msg ) ;
-            }
-            else if( ringbuf[rn % ring_size].phase >= args->end_phase ) {
-                if( loudness >= 1 ) fprintf( stderr, "[run_io_multiplexor] this is a duplicate: %d.\n", rn ) ;
-                total_dups++ ;
-                zmq_msg_close(&msg ) ;
-            }
-            else {
-                if( loudness >= 3 ) fprintf( stderr, "this is not a duplicate, dealing with it\n" ) ;
-                bam_destroy_pair( &ringbuf[ rn % ring_size ] ) ;
-                pair_init_from_msg( &ringbuf[ rn % ring_size ], &msg ) ;
-                // I think this is implicit now:
-                xassert( ringbuf[ rn % ring_size ].kind, "wrong record type in queue" ) ;
-                zmq_msg_close(&msg ) ;
-                if( ringbuf[ rn % ring_size ].phase >= args->end_phase ) {
-                    current_undone-- ;
-                    current_done++ ;
-                }
-
-received_one:
-                if( current_undone && next_resend == rn % ring_size ) 
-                    do next_resend = (next_resend+1) % ring_size ;
-                    while( ringbuf[next_resend].phase >= args->end_phase || !ringbuf[next_resend].kind ) ;
-
-                int foo = 0 ;
-                while( next_expected % ring_size != next_free % ring_size &&
-                        ringbuf[next_expected % ring_size].phase >= args->end_phase )
-                {
-                    int mykind = ringbuf[next_expected % ring_size].kind ;
-                    if( loudness >= 3 ) fprintf( stderr, "next expected: %d, next free: %d\n",
-                            next_expected % ring_size, next_free % ring_size ) ;
-
-                    // make message from pair, then invalidate the slot
-                    // so it doesn't get sent again.
-                    msg_init_from_pair( &msg, &ringbuf[next_expected % ring_size] ) ;
-                    bam_destroy_pair( &ringbuf[next_expected % ring_size] ) ;
-                    ringbuf[next_expected % ring_size].kind = 0 ; 
-                    ringbuf[next_expected % ring_size].phase = pristine ; 
-                    // shouldn't this be implicit now:
-                    // ringbuf[next_expected % ring_size].phase = pristine ;
-
-                    // this should be dispatched based on message phase
-                    zterm( zmq_msg_send( &msg, outgoing_bam, 0 ), 1, "zmq_send failed" ) goto forced_exit ;
-                    zmq_msg_close(&msg) ;
-                    total_out+=mykind;
-                    current_done--;
-                    current_invalid++;
-
-                    // How to shut down?
-                    // - If EOF is ready to be sent out, shut everything
-                    //   down and send the EOF.
-                    if( !mykind ) { if( args->cleanup ) goto forced_exit ; else goto clean_exit ; }
-                    next_expected++ ;
-                    if( loudness >= 4 ) fprintf( stderr, "spinning(1)\n" ) ;
-                    xassert( foo++ < ring_size, "logic error in queueing thread (4)" ) ;
-                }
-
-                if( current_undone ) {
-                    int foo = 0 ;
-                    while( ringbuf[next_resend].phase >= args->end_phase ) {
-                        next_resend = (next_resend+1) % ring_size ;
-                        xassert( foo++ < ring_size, "logic error in queueing thread (5)" ) ;
-                    }
-                }
-            }
+            next_free++;
+            zmq_msg_close(&msg) ;
         }
     }
     
 forced_exit:
-    zmq_xclose( args->workio[0] ) ;
-    zmq_xclose( args->workio[1] ) ;
+    zmq_xclose( args->from_crowd ) ;
+    zmq_xclose( args->to_crowd ) ;
 
 clean_exit:
-    fprintf( stderr, "[run_io_multiplexor] finished: %d records in total, %d resends, %d dups.\n",
-            total_out, total_resends, total_dups ) ;
+    fprintf( stderr, "[run_io_multiplexor] finished: %d (%d) records in total, %d resends, %d dups.\n",
+            total_out, recs_out, total_resends, total_dups ) ;
     if( incoming_bam ) zmq_close( incoming_bam ) ;
     zmq_close( outgoing_bam ) ;
     free( ringbuf ) ;
@@ -1770,21 +1769,21 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
             set_sockopts( broadcast ) ;
         }
 
-        muxargs.workio[0] = zmq_socket( zmq_context, ZMQ_PULL ) ;
-        muxargs.workio[1] = zmq_socket( zmq_context, ZMQ_PUSH ) ;
+        muxargs.from_crowd = zmq_socket( zmq_context, ZMQ_PULL ) ;
+        muxargs.to_crowd   = zmq_socket( zmq_context, ZMQ_PUSH ) ;
         
-        set_sockopts(muxargs.workio[1]);
-        set_sockopts(muxargs.workio[0]);
+        set_sockopts(muxargs.from_crowd);
+        set_sockopts(muxargs.to_crowd);
 
-        zcheck( zmq_bind( muxargs.workio[1], "inproc://work_out" ), 1, "zmq_bind failed" );
-        zcheck( zmq_bind( muxargs.workio[0], "inproc://work_in" ), 1, "zmq_bind" );
+        zcheck( zmq_bind( muxargs.to_crowd,   "inproc://work_out" ), 1, "zmq_bind failed" );
+        zcheck( zmq_bind( muxargs.from_crowd, "inproc://work_in" ), 1, "zmq_bind" );
         
         if( listen_port ) {
             char addr[100] ;
             snprintf( addr, 100, "tcp://*:%d", listen_port+1 ) ;
-            zcheck( zmq_bind( muxargs.workio[1], addr ), 1, "zmq_bind failed" );
+            zcheck( zmq_bind( muxargs.to_crowd, addr ), 1, "zmq_bind failed" );
             snprintf( addr, 100, "tcp://*:%d", listen_port+2 ) ;
-            zcheck( zmq_bind( muxargs.workio[0], addr ), 1, "zmq_bind failed" );
+            zcheck( zmq_bind( muxargs.from_crowd, addr ), 1, "zmq_bind failed" );
         }
 
         void *bam_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
