@@ -3,11 +3,20 @@
 #include "main.h"
 #include "utils.h"
 
+#define STR(exp) #exp
+#define XSTR(exp) STR(exp)
+
+#ifdef GIT_VERSION
+#define EFF_VERSION PACKAGE_VERSION "-" XSTR(GIT_VERSION)
+#else
+#define EFF_VERSION PACKAGE_VERSION 
+#endif
+
 static int usage()
 {
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Program: bwa (alignment via Burrows-Wheeler transformation)\n");
-	fprintf(stderr, "Version: %s\n", PACKAGE_VERSION);
+	fprintf(stderr, "Version: %s\n", EFF_VERSION);
 	fprintf(stderr, "Contact: Heng Li <lh3@sanger.ac.uk>\n\n");
 	fprintf(stderr, "Usage:   bwa <command> [options]\n\n");
 	fprintf(stderr, "Command: index         index sequences in the FASTA format\n");
@@ -33,7 +42,7 @@ static int usage()
 
 void bwa_print_sam_PG()
 {
-	printf("@PG\tID:bwa\tPN:bwa\tVN:%s\n", PACKAGE_VERSION);
+	printf("@PG\tID:bwa\tPN:bwa\tVN:%s\n", EFF_VERSION );
 }
 
 int main(int argc, char *argv[])
@@ -47,7 +56,7 @@ int main(int argc, char *argv[])
 	else if (strcmp(argv[1], "bwt2sa") == 0) return bwa_bwt2sa(argc-1, argv+1);
 	else if (strcmp(argv[1], "index") == 0) return bwa_index(argc-1, argv+1);
 	else if (strcmp(argv[1], "aln") == 0) return bwa_aln(argc-1, argv+1);
-	else if (strcmp(argv[1], "bam2bam") == 0) return bwa_bam_to_bam(argc-1, argv+1);
+	else if (strcmp(argv[1], "bam2bam") == 0) return bwa_bam_to_bam(argc-1, argv+1, EFF_VERSION);
 	else if (strcmp(argv[1], "worker") == 0) return bwa_worker(argc-1, argv+1);
 	else if (strcmp(argv[1], "sw") == 0) return bwa_stdsw(argc-1, argv+1);
 	else if (strcmp(argv[1], "samse") == 0) return bwa_sai2sam_se(argc-1, argv+1);

@@ -160,11 +160,11 @@ int zcheck_at( int rc, int testterm, int status, const char *label, int line, ch
 // incorporate the rest verbatim.  More specifically, HD is added, PG is added
 // and linked to the previous one using PG-PP, SQ and HD lines are removed.
 int32_t bwa_print_header_text( char* buf, int32_t len, bntseq_t *bns,
-                               const char* oldhdr, const char *pptag, const char* myid, int argc, char *argv[] )
+                               const char* oldhdr, const char *pptag, const char* myid, int argc, char *argv[], char *version )
 {
     int i;
 	int32_t c = snprintf( buf, len, "@HD\tVN:1.4\n@PG\tID:%s%s%s\tPN:bwa\tVN:%s%s",
-                          myid, pptag?"\tPP:":"", pptag?pptag:"", PACKAGE_VERSION,
+                          myid, pptag?"\tPP:":"", pptag?pptag:"", version,
                           argc?"\tCL:":"" );
     for (i = 0; i < argc ; ++i) 
         c += snprintf( buf+c, len>c?len-c:0, "%s%c", argv[i], i==argc-1?'\n':' ' );
@@ -269,7 +269,8 @@ void find_pp_tag( const char* h, char** pp, char** id )
 }
 
 int bwa_print_bam_header( BGZF* output, bntseq_t *bns,
-                          char* oldhdr, int argc, char *argv[] )
+                          char* oldhdr, int argc, char *argv[],
+                          char* version)
 {
 #define DO(x) if(r>=0) { int r1 = x; if(r1>=0) r+=r1; else r=r1; } else {}
 	int i, r=0;
@@ -277,9 +278,9 @@ int bwa_print_bam_header( BGZF* output, bntseq_t *bns,
     char *pptag, *myid ;
     find_pp_tag( oldhdr, &pptag, &myid ) ;
 
-    int32_t h_len = bwa_print_header_text( 0, 0, bns, oldhdr, pptag, myid, argc, argv );
+    int32_t h_len = bwa_print_header_text( 0, 0, bns, oldhdr, pptag, myid, argc, argv, version );
     char *buf = malloc( h_len+1 ) ;
-    bwa_print_header_text( buf, h_len+1, bns, oldhdr, pptag, myid, argc, argv );
+    bwa_print_header_text( buf, h_len+1, bns, oldhdr, pptag, myid, argc, argv, version );
     DO( bgzf_write( output, magic, 4 ) ) ;
     DO( bgzf_write( output, &h_len, 4 ) ) ;
     DO( bgzf_write( output, buf, h_len ) ) ;
@@ -1914,7 +1915,7 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
     kh_destroy(isize_infos, iinfos);
 }
 
-int bwa_bam_to_bam( int argc, char *argv[] )
+int bwa_bam_to_bam( int argc, char *argv[], char* version )
 {
 	int c, opte = -1;
     char *saif[3] = {0,0,0} ;
@@ -2032,7 +2033,7 @@ int bwa_bam_to_bam( int argc, char *argv[] )
     bns = bns_restore(prefix);
 
     BGZF* output = ofile ? bgzf_open(ofile, "w2") : bgzf_fdopen(1, "w2") ;
-    if( 0>bwa_print_bam_header(output, bns, hdr->text, argc, argv) ) {
+    if( 0>bwa_print_bam_header(output, bns, hdr->text, argc, argv,version) ) {
         fprintf( stderr, "[bwa_bam2bam_core] Error writing BAM header.\n" ) ;
         exit(1);
     }

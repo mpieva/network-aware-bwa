@@ -7,7 +7,7 @@ CFLAGS=		-ggdb -O2 -Wall
 CFLAGS+=	`pkg-config --cflags libzmq`
 # CFLAGS+=    `pkg-config --cflags libczmq`
 CXXFLAGS=	$(CFLAGS)
-DFLAGS=		-DHAVE_PTHREAD #-D_FILE_OFFSET_BITS=64
+DFLAGS=		-DHAVE_PTHREAD -DGIT_VERSION=$(shell git describe --always)
 OBJS=		utils.o bwt.o bwtio.o bwtaln.o bwtgap.o is.o \
 			bntseq.o bwtmisc.o bwtindex.o stdaln.o simple_dp.o \
 			bwaseqio.o bwase.o bwape.o kstring.o cs2nt.o \

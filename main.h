@@ -2,7 +2,7 @@
 #define BWA_MAIN_H
 
 #ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "0.5.10-evan.6.1"
+#define PACKAGE_VERSION "0.5.10-evan.6.2" 
 #endif
 
 #ifdef __cplusplus
@@ -17,7 +17,7 @@ extern "C" {
 	int bwa_bwt2sa(int argc, char *argv[]);
 	int bwa_index(int argc, char *argv[]);
 	int bwa_aln(int argc, char *argv[]);
-    int bwa_bam_to_bam(int argc, char *argv[]);
+    int bwa_bam_to_bam(int argc, char *argv[], char* vn);
     int bwa_worker(int argc, char *argv[]);
 	int bwt_bwtgen_main(int argc, char *argv[]);
 
