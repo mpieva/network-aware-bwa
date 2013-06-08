@@ -122,7 +122,7 @@ enum pair_phase {
 } ;
 
 typedef struct {
-    int recno ;             // to put them back into the correct order
+    long recno ;             // to put them back into the correct order
     enum pair_kind kind ;
     enum pair_phase phase ;
     bam1_t bam_rec[2] ;
