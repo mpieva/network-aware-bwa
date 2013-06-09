@@ -1383,18 +1383,14 @@ void *run_worker_thread( void *arg )
     khiter_t iter ;
 	my_hash = kh_init(64);
 
-    void *incoming = zmq_socket( zmq_context, ZMQ_PULL ) ;
-    void *outgoing = zmq_socket( zmq_context, ZMQ_PUSH ) ;
-    xassert(incoming, "error creating socket");
-    xassert(outgoing, "error creating socket");
-    set_sockopts( incoming ) ;
-    set_sockopts( outgoing ) ;
+    void *upstream = zmq_socket( zmq_context, ZMQ_DEALER ) ;
+    xassert(upstream, "error creating socket");
+    set_sockopts( upstream ) ;
 
-    zcheck( zmq_connect( incoming, "inproc://work_out" ), 1, "zmq_connect failed" );
-    zcheck( zmq_connect( outgoing, "inproc://work_in"  ), 1, "zmq_connect failed" );
+    zcheck( zmq_connect( upstream, "inproc://work_io" ), 1, "zmq_connect failed" );
     for(;;) {
         zmq_msg_init(&msg);
-        if( 0>zmq_msg_recv(&msg, incoming, 0) ) {
+        if( 0>zmq_msg_recv(&msg, upstream, 0) ) {
             // clean exit if we got terminated here
             if( zmq_errno() == ETERM || zmq_errno() == EINTR ) break ;
             fprintf( stderr, "zmq_msg_recv failed: %s\n", zmq_strerror( zmq_errno() ) ) ;
@@ -1415,7 +1411,7 @@ void *run_worker_thread( void *arg )
 
         msg_init_from_pair(&msg,&pair);
         bam_destroy_pair(&pair);
-        rc = zmq_msg_send(&msg, outgoing, 0);
+        rc = zmq_msg_send(&msg, upstream, 0);
         zmq_msg_close(&msg);
         zterm( rc, 1, "zmq_msg_send failed" ) break;
         if( failure_count >= 1024 ) {
@@ -1429,8 +1425,7 @@ void *run_worker_thread( void *arg )
 		if (kh_exist(my_hash, iter))
             free(kh_val(my_hash, iter).a);
 	kh_destroy(64, my_hash);
-    zmq_close(outgoing);
-    zmq_close(incoming);
+    zmq_close(upstream);
     return 0;
 }
 
@@ -1446,7 +1441,7 @@ void *run_worker_thread( void *arg )
 // FIXME: For the time being, the sliding window has a fixed size.
 //        Don't know yet how to make this more dynamic.
 struct muxer_args {
-    void *from_crowd, *to_crowd ;
+    void *the_crowd ;
     enum pair_phase end_phase ;
     const char *addr_in, *addr_out ;
     int cleanup ;
@@ -1458,8 +1453,7 @@ void *run_io_multiplexor( void* vargs )
     // Let's see... we're multiplexing between four sockets:
     // - input from BAM         (incoming_bam)
     // - output to BAM          (outgoing_bam)
-    // - fan-out to workers     (work_out)
-    // - fan-in from workers    (work_in)
+    // - I/O with workers       (the_crowd)
     void *incoming_bam = zmq_socket( zmq_context, ZMQ_PULL ) ;
     void *outgoing_bam = zmq_socket( zmq_context, ZMQ_PUSH ) ;
 
@@ -1494,8 +1488,7 @@ void *run_io_multiplexor( void* vargs )
 
     zmq_pollitem_t polls[] = {
         { socket :     outgoing_bam, fd : 0, events : 0, revents : 0 },
-        { socket :   args->to_crowd, fd : 0, events : 0, revents : 0 },
-        { socket : args->from_crowd, fd : 0, events : 0, revents : 0 },
+        { socket : args->the_crowd, fd : 0, events : 0, revents : 0 },
         { socket :     incoming_bam, fd : 0, events : 0, revents : 0 }
     } ;
 
@@ -1525,16 +1518,14 @@ void *run_io_multiplexor( void* vargs )
         // outgoing: poll for ZMQ_POLLOUT if something is done
         polls[0].events = next_output != next_undone ? ZMQ_POLLOUT : 0 ;
 
-        // to_crowd: poll for ZMQ_POLLOUT if something isn't done yet
-        polls[1].events = current_undone ? ZMQ_POLLOUT : 0 ;
-
-        // from_crowd: always, and maybe only to throw it away
-        polls[2].events = ZMQ_POLLIN ;
+        // to crowd: poll for ZMQ_POLLOUT if something isn't done yet
+        // from crowd: always, and maybe only to throw it away
+        polls[1].events = current_undone ? ZMQ_POLLOUT | ZMQ_POLLIN : ZMQ_POLLIN ;
 
         // incoming: iff we have room and still expect input
-        polls[3].events = incoming_bam && current_free ? ZMQ_POLLIN : 0 ;
+        polls[2].events = incoming_bam && current_free ? ZMQ_POLLIN : 0 ;
 
-        zterm( zmq_poll( polls, incoming_bam ? 4 : 3, -1 ), 1, "zmq_poll failed" ) break;
+        zterm( zmq_poll( polls, incoming_bam ? 3 : 2, -1 ), 1, "zmq_poll failed" ) break;
         if( s_interrupted ) break ;
 
         // can send output downstream, so send one record
@@ -1582,16 +1573,16 @@ void *run_io_multiplexor( void* vargs )
                 while( ringbuf[next_resend % ring_size].phase >= args->end_phase ) ;
             }
 
-            zterm( zmq_msg_send( &msg, args->to_crowd, 0 ), 1, "zmq_send failed" ) break;
+            zterm( zmq_msg_send( &msg, args->the_crowd, 0 ), 1, "zmq_send failed" ) break;
             zmq_msg_close( &msg ) ;
         }
 
         // Something came back from the crowd.  Make sure we actually
         // want it, then store it.
-        if(polls[2].revents & ZMQ_POLLIN) {
+        if(polls[1].revents & ZMQ_POLLIN) {
             zmq_msg_t msg ;
             zmq_msg_init( &msg ) ;
-            zterm( zmq_msg_recv( &msg, args->from_crowd, 0 ), 1, "zmq_recv failed" ) break;
+            zterm( zmq_msg_recv( &msg, args->the_crowd, 0 ), 1, "zmq_recv failed" ) break;
             
             rn = *(long*)zmq_msg_data(&msg) ;
             if( loudness >= 3 ) fprintf( stderr, "[run_io_multiplexor] received record %ld.\n", rn ) ;
@@ -1637,7 +1628,7 @@ void *run_io_multiplexor( void* vargs )
 
         // Input is available.  Store it, and also mark it as the next
         // thing to send.
-        if( polls[3].revents & ZMQ_POLLIN) {
+        if( polls[2].revents & ZMQ_POLLIN) {
             if( loudness >= 3 ) fprintf( stderr, "got input record.\n" ) ;
             zmq_msg_t msg ;
             zmq_msg_init( &msg ) ;
@@ -1674,8 +1665,8 @@ void *run_io_multiplexor( void* vargs )
                 xassert( incoming_bam, "repeated closing of incoming_bam" ) ;
                 zmq_close( incoming_bam ) ;
                 incoming_bam = 0 ;
-                polls[3].events = 0 ;
-                polls[3].revents = 0 ;
+                polls[2].events = 0 ;
+                polls[2].revents = 0 ;
                 current_done++ ;
             }
             next_free++;
@@ -1685,8 +1676,7 @@ void *run_io_multiplexor( void* vargs )
     }
     
 forced_exit:
-    zmq_xclose( args->from_crowd ) ;
-    zmq_xclose( args->to_crowd ) ;
+    zmq_xclose( args->the_crowd ) ;
 
 clean_exit:
     fprintf( stderr, "[run_io_multiplexor] finished: %ld (%ld) records in total, %ld resends, %ld dups.\n",
@@ -1779,26 +1769,19 @@ void bwa_bam2bam_core( const char *prefix, char* tmpdir, bwa_seqio_t *ks, BGZF *
             char addr[100] ;
             pthread_create( &config_service_tid, 0, run_config_service, (void*)prefix ) ;
             pthread_detach( config_service_tid ) ;
-            snprintf( addr, 100, "tcp://*:%d", listen_port+3 ) ;
+            snprintf( addr, 100, "tcp://*:%d", listen_port+2 ) ;
             zcheck( zmq_bind( broadcast, addr ), 1, "zmq_bind failed" );
             set_sockopts( broadcast ) ;
         }
 
-        muxargs.from_crowd = zmq_socket( zmq_context, ZMQ_PULL ) ;
-        muxargs.to_crowd   = zmq_socket( zmq_context, ZMQ_PUSH ) ;
-        
-        set_sockopts(muxargs.from_crowd);
-        set_sockopts(muxargs.to_crowd);
-
-        zcheck( zmq_bind( muxargs.to_crowd,   "inproc://work_out" ), 1, "zmq_bind failed" );
-        zcheck( zmq_bind( muxargs.from_crowd, "inproc://work_in" ), 1, "zmq_bind" );
+        muxargs.the_crowd = zmq_socket( zmq_context, ZMQ_DEALER ) ;
+        set_sockopts(muxargs.the_crowd);
+        zcheck( zmq_bind( muxargs.the_crowd, "inproc://work_io" ), 1, "zmq_bind" );
         
         if( listen_port ) {
             char addr[100] ;
             snprintf( addr, 100, "tcp://*:%d", listen_port+1 ) ;
-            zcheck( zmq_bind( muxargs.to_crowd, addr ), 1, "zmq_bind failed" );
-            snprintf( addr, 100, "tcp://*:%d", listen_port+2 ) ;
-            zcheck( zmq_bind( muxargs.from_crowd, addr ), 1, "zmq_bind failed" );
+            zcheck( zmq_bind( muxargs.the_crowd, addr ), 1, "zmq_bind failed" );
         }
 
         void *bam_in = zmq_socket( zmq_context, ZMQ_PUSH ) ;
@@ -2064,13 +2047,6 @@ int bwa_bam_to_bam( int argc, char *argv[], char* version )
 	return 0;
 }
 
-void *run_device( void *args )
-{
-    void **socks = args ;
-    zmq_device( ZMQ_STREAMER, socks[0], socks[1] ) ;
-    return 0 ;
-}
-
 int handle_broadcast( zmq_msg_t *m, void* sock )
 {
     zmq_msg_recv( m, sock, 0 );
@@ -2096,32 +2072,23 @@ void bwa_worker_core( int nthreads, char* host, int port )
     time_t start_time = time(0) ;
     s_catch_signals();
 
-    // Need a streamer that writes into work out and one that reads from
-    // work_in.  (Those would mimic the role of the multiplexor.)
-    void *socks[5] ;
-    socks[0] = zmq_socket( zmq_context, ZMQ_PULL ) ;
-    socks[1] = zmq_socket( zmq_context, ZMQ_PUSH ) ;
-    socks[2] = zmq_socket( zmq_context, ZMQ_PULL ) ;
-    socks[3] = zmq_socket( zmq_context, ZMQ_PUSH ) ;
-    socks[4] = zmq_socket( zmq_context, ZMQ_SUB ) ;
+    void *socks[3] ;
+    socks[0] = zmq_socket( zmq_context, ZMQ_DEALER ) ;
+    socks[1] = zmq_socket( zmq_context, ZMQ_DEALER ) ;
+    socks[2] = zmq_socket( zmq_context, ZMQ_SUB ) ;
 
     set_sockopts(socks[0]);
     set_sockopts(socks[1]);
     set_sockopts(socks[2]);
-    set_sockopts(socks[3]);
-    set_sockopts(socks[4]);
 
     char addr[100] ;
     snprintf( addr, 100, "tcp://%s:%d", host, port+1 ) ;
     zcheck( zmq_connect( socks[0], addr ), 1, "zmq_connect failed" );
-    zcheck( zmq_bind( socks[1], "inproc://work_out" ), 1, "zmq_bind failed" );
-    zcheck( zmq_bind( socks[2], "inproc://work_in" ), 1, "zmq_bind failed" );
+    zcheck( zmq_bind( socks[1], "inproc://work_io" ), 1, "zmq_bind failed" );
     snprintf( addr, 100, "tcp://%s:%d", host, port+2 ) ;
-    zcheck( zmq_connect( socks[3], addr ), 1, "zmq_connect failed" );
-    snprintf( addr, 100, "tcp://%s:%d", host, port+3 ) ;
-    zcheck( zmq_connect( socks[4], addr ), 1, "zmq_connect failed" );
+    zcheck( zmq_connect( socks[2], addr ), 1, "zmq_connect failed" );
 
-    zcheck( zmq_setsockopt( socks[4], ZMQ_SUBSCRIBE, "", 0 ), 1, "subscription failed" ) ;
+    zcheck( zmq_setsockopt( socks[2], ZMQ_SUBSCRIBE, "", 0 ), 1, "subscription failed" ) ;
 
     int n;
     for(n=0;n!=nthreads;++n) {
@@ -2130,59 +2097,75 @@ void bwa_worker_core( int nthreads, char* host, int port )
         pthread_detach(worker_tid);
     }
 
-    // This device relays stuff from work_out back to the network.
-    pthread_t fan_out ;
-    pthread_create( &fan_out, 0, run_device, socks ) ;
-
-    // Now run the streamer for the fan-in.  We just ping-pong between
-    // receive and send, but if either times out, we simply terminate.
+    // Run a streamer device: we forward betweens socks[0] and socks[1]
+    // in both directions, buffering only one message every time to keep
+    // it simple.  At the same time, we listen for broadcasts on
+    // socks[2].
     zmq_pollitem_t pitems[] = {
-        { socks[2], 0, ZMQ_POLLIN, 0 },
-        { socks[4], 0, ZMQ_POLLIN, 0 },
-        { socks[3], 0, ZMQ_POLLOUT, 0 } } ;
+        { socks[0], 0, 0, 0 },
+        { socks[1], 0, 0, 0 },
+        { socks[2], 0, ZMQ_POLLIN, 0 } } ;
 
-    int npoll=0;
-    zmq_msg_t m, m2 ;
-    zmq_msg_init(&m) ;
-    zmq_msg_init(&m2) ;
+    int npoll=0, have_inbound=0, have_outbound=0;
+    zmq_msg_t inbound, outbound, broadcast ;
+    zmq_msg_init(&inbound) ;
+    zmq_msg_init(&outbound) ;
+    zmq_msg_init(&broadcast) ;
+
     while (!s_interrupted && time(0) - start_time < max_run_time*60) {
-        npoll = zmq_poll( pitems, 2, 1E3 * timeout ) ;
+        pitems[0].events = (have_inbound  ? 0 : ZMQ_POLLIN) | (have_outbound ? ZMQ_POLLOUT : 0) ;
+        pitems[1].events = (have_outbound ? 0 : ZMQ_POLLIN) | (have_inbound  ? ZMQ_POLLOUT : 0) ;
+
+        npoll = zmq_poll( pitems, 3, 1E3 * timeout ) ;
         zterm( npoll, 1, "zmq_poll failed" ) break;
-
         if( npoll == 0 ) break ;
+
+        if( pitems[0].revents & ZMQ_POLLIN ) 
+        {
+            xassert( !have_inbound, "oops, to much coming in" ) ;
+            zterm( zmq_msg_recv( &inbound, socks[0], 0 ), 1, "zmq_recv failed" ) break;
+            have_inbound=1 ;
+        }
+        if( pitems[0].revents & ZMQ_POLLOUT ) 
+        {
+            xassert( have_outbound, "oops, nothing going out" ) ;
+            zterm( zmq_msg_send( &outbound, socks[0], 0 ), 1, "zmq_send failed" ) break;
+            have_outbound=0 ;
+        }
+
         if( pitems[1].revents & ZMQ_POLLIN ) 
-            if( !handle_broadcast( &m2, socks[4] ) ) break ;
-        zterm( zmq_msg_recv( &m, socks[2], 0 ), 1, "zmq_recv failed" ) break;
+        {
+            xassert( !have_outbound, "oops, to much going out" ) ;
+            zterm( zmq_msg_recv( &outbound, socks[1], 0 ), 1, "zmq_recv failed" ) break;
+            have_outbound=1 ;
+        }
+        if( pitems[1].revents & ZMQ_POLLOUT ) 
+        {
+            xassert( have_inbound, "oops, nothing coming in" ) ;
+            zterm( zmq_msg_send( &inbound, socks[1], 0 ), 1, "zmq_send failed" ) break;
+            have_inbound=0 ;
+        }
 
-        npoll = zmq_poll( pitems+1, 2, 1E3 * timeout ) ;
-        zterm( npoll, 1, "zmq_poll failed" ) break;
-
-        if( npoll == 0 ) break ;
-        if( pitems[1].revents & ZMQ_POLLIN ) 
-            if( !handle_broadcast( &m2, socks[4] ) ) break ;
-
-        zterm( zmq_msg_send( &m, socks[3], 0 ), 1, "zmq_send failed" ) break;
+        if( pitems[2].revents & ZMQ_POLLIN ) 
+            if( !handle_broadcast( &broadcast, socks[2] ) ) break ;
     }
 
     if( npoll==0 )
         fprintf( stderr, "[bwa_worker_core] No work delivered in %ds.  Terminating.\n", timeout ) ;
-    else if( pitems[1].revents & ZMQ_POLLIN ) {
+    else if( pitems[2].revents & ZMQ_POLLIN ) {
         fprintf( stderr, "[bwa_worker_core] Received termination signal: \"%.*s\".\n",
-                (int)zmq_msg_size(&m2)-1, (char*)zmq_msg_data(&m2)+1 ) ;
+                (int)zmq_msg_size(&broadcast)-1, (char*)zmq_msg_data(&broadcast)+1 ) ;
     } else if( s_interrupted ) 
         fprintf( stderr, "[bwa_worker_core] Received interrupt signal.\n" ) ;
     else 
         fprintf( stderr, "[bwa_worker_core] I've been going for %d minutes, I'm tired now.\n",
                 (int)(time(0) - start_time) / 60 ) ;
 
-    zmq_msg_close(&m);
-    zmq_msg_close(&m2);
+    zmq_msg_close(&inbound);
+    zmq_msg_close(&outbound);
+    zmq_msg_close(&broadcast);
 
-    pthread_cancel( fan_out ) ;
-    pthread_join( fan_out, 0 ) ;
-    zmq_xclose(socks[4]) ;
-    zmq_xclose(socks[3]) ;
-    zmq_close(socks[2]) ;
+    zmq_xclose(socks[2]) ;
     zmq_close(socks[1]) ;
     zmq_xclose(socks[0]) ;
 
