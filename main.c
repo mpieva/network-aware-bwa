@@ -7,7 +7,7 @@
 #define XSTR(exp) STR(exp)
 
 #ifdef GIT_VERSION
-#define EFF_VERSION PACKAGE_VERSION "-" XSTR(GIT_VERSION)
+#define EFF_VERSION XSTR(GIT_VERSION)
 #else
 #define EFF_VERSION PACKAGE_VERSION 
 #endif
