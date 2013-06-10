@@ -2044,7 +2044,7 @@ int bwa_bam_to_bam( int argc, char *argv[], char* version )
 
 	free(pe_opt);
 	free(gap_opt);
-	return 0;
+	return s_interrupted ;
 }
 
 int handle_broadcast( zmq_msg_t *m, void* sock )
