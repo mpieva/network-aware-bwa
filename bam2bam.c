@@ -1487,9 +1487,9 @@ void *run_io_multiplexor( void* vargs )
     gettimeofday( &tv0, 0 ); tv0.tv_sec -= 5;
 
     zmq_pollitem_t polls[] = {
-        { socket :     outgoing_bam, fd : 0, events : 0, revents : 0 },
+        { socket :    outgoing_bam, fd : 0, events : 0, revents : 0 },
         { socket : args->the_crowd, fd : 0, events : 0, revents : 0 },
-        { socket :     incoming_bam, fd : 0, events : 0, revents : 0 }
+        { socket :    incoming_bam, fd : 0, events : 0, revents : 0 }
     } ;
 
     while (!s_interrupted) {
@@ -1503,7 +1503,8 @@ void *run_io_multiplexor( void* vargs )
 
         xassert( next_undone - next_output <= current_done, "output buffer is not completely done" ) ;
         xassert( next_send - next_undone <= current_done + current_undone, "mixed buffer is not completely done or undone" ) ;
-        xassert( next_free - next_send <= current_undone, "send buffer is not completely undone" ) ;
+        // send buffer contains only undone stuff OR the eof marker
+        xassert( next_free - next_send <= current_undone + !incoming_bam, "send buffer is not completely undone" ) ;
             
         gettimeofday( &tv1, 0 ) ;
         if( loudness >= 2 || tdiff(&tv0,&tv1) >= 10 ) {
@@ -1525,7 +1526,13 @@ void *run_io_multiplexor( void* vargs )
         // incoming: iff we have room and still expect input
         polls[2].events = incoming_bam && current_free ? ZMQ_POLLIN : 0 ;
 
-        zterm( zmq_poll( polls, incoming_bam ? 3 : 2, -1 ), 1, "zmq_poll failed" ) break;
+        int rc_ = zmq_poll( polls, incoming_bam ? 3 : 2, -1 ) ;
+        if( rc_ == -1 ) {
+            fprintf( stderr, "zmq_poll failed.  Sockets: %p, %p, %p; Fds: %d, %d, %d; Expecting input? %d\n",
+                    polls[0].socket, polls[1].socket, polls[2].socket, 
+                    polls[0].fd, polls[1].fd, polls[2].fd, !!incoming_bam );
+            zterm( rc_, 1, "zmq_poll failed" ) break;
+        }
         if( s_interrupted ) break ;
 
         // can send output downstream, so send one record
@@ -1560,7 +1567,10 @@ void *run_io_multiplexor( void* vargs )
             zmq_msg_t msg ;
             if( next_send != next_free ) {
                 msg_init_from_pair( &msg, &ringbuf[next_send % ring_size] ) ;
-                next_send++ ;
+                do {
+                    next_send++ ;
+                } while( next_send != next_free &&
+                        ringbuf[next_send % ring_size].phase >= args->end_phase ) ;
             }
             else {
                 msg_init_from_pair( &msg, &ringbuf[next_resend % ring_size] ) ;
@@ -1667,6 +1677,10 @@ void *run_io_multiplexor( void* vargs )
                 incoming_bam = 0 ;
                 polls[2].events = 0 ;
                 polls[2].revents = 0 ;
+                if( next_send   == next_free ) next_send++   ;
+                if( next_resend == next_free ) next_resend++ ;
+                if( next_undone == next_free ) next_undone++ ;
+                if( next_output == next_free ) next_output++ ;
                 current_done++ ;
             }
             next_free++;
