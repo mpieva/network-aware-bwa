@@ -2021,7 +2021,7 @@ int bwa_bam_to_bam( int argc, char *argv[], char* version )
         fprintf(stderr, "         -p, --listen-port PORT            listen for workers on PORT [%d]\n", listen_port);
 		fprintf(stderr, "         -t, --num-threads INT             number of threads [%d]\n", gap_opt->n_threads);
         fprintf(stderr, "             --debug-bam                   add additional fields to BAM output to aid debugging\n");
-        fprintf(stderr, "             --broken-input                ignore lone mates in input BAM (not recommended)\n");
+        fprintf(stderr, "             --broken-input                discard lone mates from input BAM (not recommended)\n");
         fprintf(stderr, "             --skip-duplicates             do not bother mapping reads marked as duplicates\n");
         fprintf(stderr, "             --temp-dir                    location of intermediate file [%s]\n", tmpname);
 		fprintf(stderr, "         -0, -1, -2                        provide up to three sai files to resume from (not recommended)\n");
