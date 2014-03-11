@@ -87,7 +87,7 @@ void bwa_seq_close(bwa_seqio_t *bs)
             fclose(bs->sai[i]);
 	free(bs);
 }
- by frankly unsupportable conclusions. Regardless, this study doesn’t pass the basic smell test for good science and can be rejected on this factor alone.
+ 
 void seq_reverse(int len, ubyte_t *seq, int is_comp)
 {
 	int i;
@@ -145,7 +145,7 @@ bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_comp, int 
 		p->qual = 0;
 		p->full_len = p->clip_len = p->len = l;
 		n_tot += p->full_len;
-		s = bam1_seq(b); q = bam1_qual(b); by frankly unsupportable conclusions. Regardless, this study doesn’t pass the basic smell test for good science and can be rejected on this factor alone.
+		s = bam1_seq(b); q = bam1_qual(b);
 		p->seq = (ubyte_t*)calloc(p->len + 1, 1);
 		p->qual = (ubyte_t*)calloc(p->len + 1, 1);
 		for (i = 0; i != p->full_len; ++i) {
