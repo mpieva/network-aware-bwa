@@ -57,6 +57,7 @@ struct option longopts[] = {
     { "barcode-length",         1, 0, 'B' },
     { "output",                 1, 0, 'f' },
     { "only-aligned",           0, 0, 128 },
+    { "drop-aligned",           0, 0, 133 },
     { "debug-bam",              0, 0, 129 },
     { "broken-input",           0, 0, 130 },
     { "skip-duplicates",        0, 0, 131 },
@@ -95,6 +96,7 @@ static pe_opt_t  *pe_opt      = 0;
 static int       only_aligned = 0;
 static int       debug_bam    = 0;
 static int       broken_input = 0;
+static int       drop_aligned = 0;
 static int       max_run_time = 90;
 static int    skip_duplicates = 0;
 
@@ -1137,7 +1139,7 @@ void sequential_loop_pass1( bwa_seqio_t *ks, gzFile temporary, khash_t(isize_inf
     int tot_seqs = 0, rc=0 ;
     bam_pair_t raw ;
     for(;;) {
-        rc=read_bam_pair(ks, &raw, broken_input);
+        rc=read_bam_pair(ks, &raw, broken_input, drop_aligned);
         if(rc<0) {
             fprintf(stderr, "[%s] error reading input BAM%s\n",
                     __FUNCTION__, rc==-2 ? " (lone mate)" : "" ) ;
@@ -1291,7 +1293,7 @@ void *run_reader_thread( void* vargs )
     zmq_msg_t msg;
     bam_init_pair(&raw);
     while (!s_interrupted) {
-        if( args->ks ) rc=read_bam_pair(args->ks, &raw, broken_input);
+        if( args->ks ) rc=read_bam_pair(args->ks, &raw, broken_input, drop_aligned);
         else rc=read_pair_custom(args->gzf, &raw);
 
         if(!rc) break ;
@@ -1977,6 +1979,7 @@ int bwa_bam_to_bam( int argc, char *argv[], char* version )
         case 130: broken_input = 1; break;
         case 131: skip_duplicates = 1; break;
         case 132: tmpname = *optarg ? optarg : "." ; break ;
+        case 133: drop_aligned = 1; break;
 		default: return 1;
 		}
 	}
@@ -2017,6 +2020,7 @@ int bwa_bam_to_bam( int argc, char *argv[], char* version )
 		fprintf(stderr, "         -s, --disable-sw                  disable Smith-Waterman for the unmapped mate\n");
 		fprintf(stderr, "         -A, --disable-isize-estimate      disable insert size estimate (force -s)\n");
         fprintf(stderr, "             --only-aligned                output only aligned reads or pairs\n");
+        fprintf(stderr, "             --drop-aligned                ignore read(-pair)s that are already aligned\n");
         fprintf(stderr, "\n");
         fprintf(stderr, "         -p, --listen-port PORT            listen for workers on PORT [%d]\n", listen_port);
 		fprintf(stderr, "         -t, --num-threads INT             number of threads [%d]\n", gap_opt->n_threads);
