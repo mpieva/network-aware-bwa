@@ -469,8 +469,8 @@ int read_bam_pair(bwa_seqio_t *bs, bam_pair_t *pair, int allow_broken, int ignor
     do {
         r = read_bam_pair_core( bs, pair, allow_broken ) ;
     } while( ignore_aligned && r > 0 &&
-            ( pair->bam_rec[0].core.flag & BAM_FUNMAP == 0 ||
-            ( pair->kind == proper_pair && pair->bam_rec[1].core.flag & BAM_FUNMAP == 0 ) ) ) ;
+            ( (pair->bam_rec[0].core.flag & BAM_FUNMAP) == 0 ||
+            ( pair->kind == proper_pair && (pair->bam_rec[1].core.flag & BAM_FUNMAP) == 0 ) ) ) ;
 
     if( pair->kind == singleton ) {
         if( try_get_sai( bs->sai, 0, &pair->bwa_seq[0].n_aln, &pair->bwa_seq[0].aln ) )
