@@ -1014,11 +1014,20 @@ inline int get_int( unsigned char **p )
            (int)(*p)[-4] <<  0 ;
 }
 
+inline int get_uint( unsigned char **p )
+{
+    *p += 4 ;
+    return (unsigned)(*p)[-1] << 24 |
+           (unsigned)(*p)[-2] << 16 |
+           (unsigned)(*p)[-3] <<  8 |
+           (unsigned)(*p)[-4] <<  0 ;
+}
+
 inline long get_long( unsigned char **p )
 {
-    int x = get_int( p ) ;
-    int y = get_int( p ) ;
-    return (long)y << 32 | (long)x ;
+    long x = get_uint( p ) ;
+    long y = get_int( p ) ;
+    return y << 32 | x ;
 }
 
 inline void get_block( unsigned char **p, void *q, size_t s )
@@ -2214,6 +2223,10 @@ int bwa_worker( int argc, char *argv[] )
             default: return 1;
         }
     }
+
+    // XXX  Brutal hack to overwrite the number of threads, because the
+    // Sun Grid Engine is simply uncooperative :-/
+    nthreads = sysconf( _SC_NPROCESSORS_ONLN ) ;
 
     if( optind != argc ) {
 		fprintf(stderr, "\n");
