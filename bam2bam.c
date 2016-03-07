@@ -932,7 +932,7 @@ inline void put_int( unsigned char **p, int x )
     *p += 4 ;
 }
 
-inline void put_long( unsigned char **p, long x )
+inline void put_long( unsigned char **p, uint64_t x )
 {
     put_int( p, x >>  0 & 0xffffffff ) ;
     put_int( p, x >> 32 & 0xffffffff ) ;
@@ -1008,7 +1008,7 @@ void msg_init_from_pair(zmq_msg_t *m, bam_pair_t *p)
 inline int get_int( unsigned char **p )
 {
     *p += 4 ;
-    return (int)(*p)[-1] << 24 |
+    return (int)(*(signed char**)p)[-1] << 24 |
            (int)(*p)[-2] << 16 |
            (int)(*p)[-3] <<  8 |
            (int)(*p)[-4] <<  0 ;
@@ -1023,10 +1023,10 @@ inline int get_uint( unsigned char **p )
            (unsigned)(*p)[-4] <<  0 ;
 }
 
-inline long get_long( unsigned char **p )
+inline uint64_t get_long( unsigned char **p )
 {
-    long x = get_uint( p ) ;
-    long y = get_int( p ) ;
+    uint64_t x = get_uint( p ) ;
+    uint64_t y = get_uint( p ) ;
     return y << 32 | x ;
 }
 
@@ -1297,7 +1297,8 @@ void *run_reader_thread( void* vargs )
 {
     struct reader_thread_args *args = vargs ;
 
-    int recno = 0, rc=0;
+    uint64_t recno = 0;
+    int rc=0;
     bam_pair_t raw;
     zmq_msg_t msg;
     bam_init_pair(&raw);
@@ -1313,7 +1314,7 @@ void *run_reader_thread( void* vargs )
         }
 
         raw.recno = recno++; 
-        if(!(recno%chunksize)) fprintf( stderr, "[run_reader_thread] %d records read so far.\n", recno );
+        if(!(recno%chunksize)) fprintf( stderr, "[run_reader_thread] %ld records read so far.\n", recno );
         msg_init_from_pair( &msg, &raw );
         bam_destroy_pair(&raw);
         zterm( zmq_msg_send(&msg, args->socket, 0), 1, "zmq_send failed" ) break;
@@ -1327,7 +1328,7 @@ void *run_reader_thread( void* vargs )
         msg_init_from_pair( &msg, &raw );
         bam_destroy_pair(&raw);
         zterm( zmq_msg_send(&msg, args->socket, 0), 0, "zmq_send failed" );
-        fprintf( stderr, "[run_reader_thread] finished, %d records in total.\n", recno );
+        fprintf( stderr, "[run_reader_thread] finished, %ld records in total.\n", recno );
         zmq_msg_close(&msg);
     }
     zmq_close(args->socket);
@@ -1337,7 +1338,7 @@ void *run_reader_thread( void* vargs )
 void *run_output_thread( BGZF *ks, gzFile output, void* socket, khash_t(isize_infos) *iinfos )
 {
     struct timeval tv0, tv1 ;
-    long lastrn = 0 ;
+    uint64_t lastrn = 0 ;
     double rate = -1 ;
 
     gettimeofday( &tv0, 0 ) ;
