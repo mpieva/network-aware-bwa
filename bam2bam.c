@@ -1014,7 +1014,7 @@ inline int get_int( unsigned char **p )
            (int)(*p)[-4] <<  0 ;
 }
 
-inline int get_uint( unsigned char **p )
+inline unsigned get_uint( unsigned char **p )
 {
     *p += 4 ;
     return (unsigned)(*p)[-1] << 24 |
@@ -1297,7 +1297,7 @@ void *run_reader_thread( void* vargs )
 {
     struct reader_thread_args *args = vargs ;
 
-    uint64_t recno = 0;
+    uint64_t recno = 0 ;
     int rc=0;
     bam_pair_t raw;
     zmq_msg_t msg;
@@ -1594,6 +1594,7 @@ void *run_io_multiplexor( void* vargs )
                 }
                 while( ringbuf[next_resend % ring_size].phase >= args->end_phase ) ;
             }
+
 
             zterm( zmq_msg_send( &msg, args->the_crowd, 0 ), 1, "zmq_send failed" ) break;
             zmq_msg_close( &msg ) ;
@@ -2225,11 +2226,13 @@ int bwa_worker( int argc, char *argv[] )
         }
     }
 
-    // XXX  Brutal hack to overwrite the number of threads, because the
+    // Brutal hack to overwrite the number of threads, because the
     // Sun Grid Engine is simply uncooperative :-/
-    nthreads = sysconf( _SC_NPROCESSORS_ONLN ) ;
+    if( getenv( "SGE_JOB_SPOOL_DIR" ) ) {
+        nthreads = sysconf( _SC_NPROCESSORS_ONLN ) ;
+    }
 
-    if( optind != argc ) {
+    if( optind != argc || !port ) {
 		fprintf(stderr, "\n");
 		fprintf(stderr, "Usage:   bwa worker [options]\n\n") ;
 		fprintf(stderr, "Options: -t, --num-threads NUM             number of worker threads [%d]\n", nthreads);
