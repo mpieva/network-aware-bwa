@@ -2229,7 +2229,9 @@ int bwa_worker( int argc, char *argv[] )
     // Brutal hack to overwrite the number of threads, because the
     // Sun Grid Engine is simply uncooperative :-/
     if( getenv( "SGE_JOB_SPOOL_DIR" ) ) {
-        nthreads = sysconf( _SC_NPROCESSORS_ONLN ) ;
+        int ncores = sysconf( _SC_NPROCESSORS_ONLN ) ;
+        if( ncores < nthreads )
+            nthreads = ncores ;
     }
 
     if( optind != argc || !port ) {
