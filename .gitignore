@@ -1,5 +1,5 @@
 *.[oh]
-bwa
+network-aware-bwa
 depend.mk
 tags
 bwt_gen/libbwtgen.a

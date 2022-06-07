@@ -14,7 +14,7 @@ OBJS=		utils.o bwt.o bwtio.o bwtaln.o bwtgap.o is.o \
 			bwtsw2_core.o bwtsw2_main.o bwtsw2_aux.o bwt_lite.o \
 			bwtsw2_chain.o bamlite.o bam2bam.o bgzf.o \
 			insert_size.o
-PROG=		bwa
+PROG=		network-aware-bwa
 INCLUDES=	
 LIBS=		-lm -lz -lpthread -Lbwt_gen -lbwtgen
 LIBS+=		`pkg-config --libs libzmq`
@@ -33,9 +33,9 @@ all:$(PROG)
 
 install: all
 	install -d         $(prefix)/bin
-	install -m 775 bwa $(prefix)/bin/
-	install -d           $(prefix)/share/man/man1
-	install -m 644 bwa.1 $(prefix)/share/man/man1/
+	install -m 775 network-aware-bwa $(prefix)/bin/
+# install -d           $(prefix)/share/man/man1
+# install -m 644 bwa.1 $(prefix)/share/man/man1/
 
 lib-recur all-recur clean-recur cleanlocal-recur install-recur:
 		@target=`echo $@ | sed s/-recur//`; \
@@ -49,7 +49,7 @@ lib-recur all-recur clean-recur cleanlocal-recur install-recur:
 
 lib:
 
-bwa:lib-recur $(OBJS) main.o
+network-aware-bwa:lib-recur $(OBJS) main.o
 		$(CC) $(CFLAGS) $(DFLAGS) $(OBJS) main.o -o $@ $(LIBS)
 
 
